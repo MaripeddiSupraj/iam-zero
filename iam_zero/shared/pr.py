@@ -82,7 +82,12 @@ def open_pr(
     days: int,
     branch_name: str,
     base_branch: str = "main",
-) -> str | None:
+) -> tuple[str, bool]:
+    """
+    Returns (pr_url, is_new).
+    is_new=True  → PR was just created.
+    is_new=False → an open PR for this identity already existed.
+    """
     title = f"fix(iam): tighten permissions for {identity_short} [{cloud}]"
     body = _build_pr_body(cloud, identity, findings, current_policy, new_policy, days)
 
@@ -97,7 +102,7 @@ def open_pr(
 
     existing = _find_existing_pr(repo, f"fix(iam): tighten permissions for {identity_short}")
     if existing:
-        return existing
+        return existing, False
 
     try:
         pr = repo.create_pull(
@@ -106,7 +111,7 @@ def open_pr(
             head=branch_name,
             base=base_branch,
         )
-        return pr.html_url
+        return pr.html_url, True
     except GithubException as e:
         raise RuntimeError(
             f"Failed to open PR: {e.data.get('message', str(e))}"
