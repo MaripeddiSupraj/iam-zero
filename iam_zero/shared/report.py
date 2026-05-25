@@ -58,8 +58,20 @@ def print_permission_table(findings: list[dict]) -> None:
 def print_dry_run_notice() -> None:
     console.print(
         Panel(
-            "[bold yellow]DRY RUN[/bold yellow] — no PR will be opened. "
-            "Remove [bold]--dry-run[/bold] to create the PR.",
+            "[bold yellow]DRY RUN[/bold yellow] — terminal output only. "
+            "Use [bold]--output <path>[/bold] to save policy JSON or "
+            "[bold]--github[/bold] to open a PR.",
             box=box.ROUNDED,
         )
     )
+
+
+def print_policy_terminal(current_json: str, new_json: str) -> None:
+    console.print("\n[bold]Current policy[/bold]")
+    console.print(current_json)
+    console.print("\n[bold]Proposed minimal policy[/bold]")
+    console.print(new_json)
+
+
+def print_output_written(path: str) -> None:
+    print_success(f"Policy written to {path}")

@@ -5,6 +5,7 @@ import click
 import anthropic
 
 from .shared.config import load_config, save_config, get_github_token, get_anthropic_api_key
+from .shared.output import resolve_output_mode, write_policy_file
 from .shared.report import (
     console,
     print_header,
@@ -14,6 +15,8 @@ from .shared.report import (
     print_info,
     print_permission_table,
     print_dry_run_notice,
+    print_policy_terminal,
+    print_output_written,
 )
 
 
@@ -68,7 +71,6 @@ def auth():
 @click.option("--project", default=None, help="GCP project ID")
 def auth_test(profile, project):
     """Verify AWS + GCP credentials work."""
-    # AWS
     try:
         import boto3
         session = boto3.Session(profile_name=profile)
@@ -78,7 +80,6 @@ def auth_test(profile, project):
     except Exception as e:
         print_error(f"AWS authentication failed: {e}")
 
-    # GCP
     if project:
         try:
             from google.cloud import resourcemanager_v3
@@ -97,12 +98,7 @@ def auth_test(profile, project):
 
 @cli.group()
 def scan():
-    """Scan IAM roles and open least-privilege PRs."""
-
-
-@cli.group()
-def report():
-    """Print an IAM analysis without opening a PR."""
+    """Scan IAM roles for overpermissioning."""
 
 
 # ---------------------------------------------------------------------------
@@ -113,13 +109,38 @@ def report():
 @click.option("--role", "role_arn", required=True, help="IAM role ARN to scan")
 @click.option("--days", default=90, show_default=True, help="Look-back window in days")
 @click.option("--profile", default=None, help="AWS profile name")
-@click.option("--repo", default=None, help="GitHub repo (owner/repo) — overrides config")
-@click.option("--dry-run", is_flag=True, help="Print what PR would say; don't open one")
-def scan_aws(role_arn, days, profile, repo, dry_run):
-    """Scan an AWS IAM role and open a least-privilege PR."""
-    cfg = load_config()
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Print findings to terminal only (default behaviour if no output flag given)")
+@click.option("--output", "output_path", default=None, metavar="PATH",
+              help="Write recommended policy JSON to this file")
+@click.option("--github", "open_github_pr", is_flag=True, default=False,
+              help="Open a GitHub PR (requires token + repo in config)")
+def scan_aws(role_arn, days, profile, dry_run, output_path, open_github_pr):
+    """Scan an AWS IAM role and output a least-privilege policy.
 
-    if dry_run:
+    Default (no flags): prints findings to terminal. Safe, no side effects.
+    """
+    cfg = load_config()
+    mode = resolve_output_mode(dry_run, output_path, open_github_pr)
+
+    # Validate GitHub config upfront — fail fast before expensive API calls
+    github_token = None
+    target_repo = None
+    if mode.github:
+        try:
+            github_token = get_github_token(cfg)
+        except ValueError as e:
+            print_error(str(e))
+            sys.exit(1)
+        target_repo = cfg.get("github", {}).get("default_repo", "")
+        if not target_repo:
+            print_error(
+                "No GitHub repo configured.\n"
+                "  Run: iam-zero configure"
+            )
+            sys.exit(1)
+
+    if mode.is_dry_run:
         print_dry_run_notice()
 
     print_header(f"iam-zero AWS scan: {role_arn}")
@@ -178,96 +199,54 @@ def scan_aws(role_arn, days, profile, repo, dry_run):
 
     print_permission_table(findings)
 
-    # 5. Generate minimal policy
+    # 5. Generate policies
     from .aws.policy_generator import generate_minimal_policy
     current_policy_json = json.dumps(
-        {"Version": "2012-10-17", "Statement": [s for doc in raw_docs for s in doc.get("Statement", [])]},
+        {
+            "Version": "2012-10-17",
+            "Statement": [s for doc in raw_docs for s in doc.get("Statement", [])],
+        },
         indent=2,
     )
     new_policy_json = generate_minimal_policy(used_actions, findings, raw_docs)
 
-    if dry_run:
-        console.print("\n[bold]--- Current policy ---[/bold]")
-        console.print(current_policy_json)
-        console.print("\n[bold]--- Proposed minimal policy ---[/bold]")
-        console.print(new_policy_json)
+    # 6. Output
+    if mode.is_dry_run:
+        print_policy_terminal(current_policy_json, new_policy_json)
         sys.exit(0)
 
-    # 6. Open PR
-    target_repo = repo or cfg.get("github", {}).get("default_repo", "")
-    if not target_repo:
-        print_error(
-            "No GitHub repo configured.\n"
-            "  Run: iam-zero configure\n"
-            "  Or pass: --repo owner/repo"
-        )
-        sys.exit(1)
+    if mode.file_path:
+        try:
+            write_policy_file(mode.file_path, new_policy_json)
+            print_output_written(mode.file_path)
+        except OSError as e:
+            print_error(f"Failed to write policy file: {e}")
+            sys.exit(1)
 
-    try:
-        github_token = get_github_token(cfg)
-        from .shared.pr import open_pr
+    if mode.github:
         role_short = role_arn.split("/")[-1]
-        pr_url = open_pr(
-            github_token=github_token,
-            repo_name=target_repo,
-            cloud="aws",
-            identity=role_arn,
-            identity_short=role_short,
-            findings=findings,
-            current_policy=current_policy_json,
-            new_policy=new_policy_json,
-            days=days,
-            branch_name=f"iam-zero/aws-{role_short}",
-            dry_run=dry_run,
-        )
-    except (ValueError, RuntimeError) as e:
-        print_error(str(e))
-        sys.exit(1)
+        try:
+            from .shared.pr import open_pr
+            pr_url = open_pr(
+                github_token=github_token,
+                repo_name=target_repo,
+                cloud="aws",
+                identity=role_arn,
+                identity_short=role_short,
+                findings=findings,
+                current_policy=current_policy_json,
+                new_policy=new_policy_json,
+                days=days,
+                branch_name=f"iam-zero/aws-{role_short}",
+            )
+        except RuntimeError as e:
+            print_error(str(e))
+            sys.exit(1)
 
-    if pr_url:
-        print_success(f"PR opened: {pr_url}")
-    else:
-        print_warning("A PR for this role already exists.")
-
-
-# ---------------------------------------------------------------------------
-# report aws
-# ---------------------------------------------------------------------------
-
-@report.command("aws")
-@click.option("--role", "role_arn", required=True, help="IAM role ARN to analyze")
-@click.option("--days", default=90, show_default=True)
-@click.option("--profile", default=None)
-def report_aws(role_arn, days, profile):
-    """Print unused permissions for an AWS role — no PR opened."""
-    cfg = load_config()
-    print_header(f"iam-zero AWS report: {role_arn}")
-
-    try:
-        from .aws.cloudtrail import fetch_used_actions
-        from .aws.iam_analyzer import get_role_policies, compute_unused
-        used_actions = fetch_used_actions(role_arn, days, profile=profile)
-        current_actions, _ = get_role_policies(role_arn, profile=profile)
-        unused_actions = compute_unused(current_actions, used_actions)
-    except (PermissionError, RuntimeError) as e:
-        print_error(str(e))
-        sys.exit(1)
-
-    if not unused_actions:
-        print_success("No unused permissions found.")
-        return
-
-    try:
-        api_key = get_anthropic_api_key(cfg)
-        ai = anthropic.Anthropic(api_key=api_key)
-        from .agent.analyst import analyze_aws_permissions
-        findings = analyze_aws_permissions(
-            ai, role_arn, current_actions, list(used_actions), unused_actions, days
-        )
-        print_permission_table(findings)
-    except (ValueError, Exception) as e:
-        print_error(f"Analysis failed: {e}")
-        sys.exit(1)
+        if pr_url:
+            print_success(f"PR opened: {pr_url}")
+        else:
+            print_warning("A PR for this role already exists.")
 
 
 # ---------------------------------------------------------------------------
@@ -275,16 +254,42 @@ def report_aws(role_arn, days, profile):
 # ---------------------------------------------------------------------------
 
 @scan.command("gcp")
-@click.option("--service-account", "service_account", required=True, help="Service account email")
+@click.option("--service-account", "service_account", required=True,
+              help="Service account email")
 @click.option("--project", required=True, help="GCP project ID")
 @click.option("--days", default=90, show_default=True)
-@click.option("--repo", default=None, help="GitHub repo (owner/repo) — overrides config")
-@click.option("--dry-run", is_flag=True)
-def scan_gcp(service_account, project, days, repo, dry_run):
-    """Scan a GCP service account and open a least-privilege PR."""
-    cfg = load_config()
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Print findings to terminal only (default behaviour if no output flag given)")
+@click.option("--output", "output_path", default=None, metavar="PATH",
+              help="Write recommended policy JSON to this file")
+@click.option("--github", "open_github_pr", is_flag=True, default=False,
+              help="Open a GitHub PR (requires token + repo in config)")
+def scan_gcp(service_account, project, days, dry_run, output_path, open_github_pr):
+    """Scan a GCP service account and output a least-privilege policy.
 
-    if dry_run:
+    Default (no flags): prints findings to terminal. Safe, no side effects.
+    """
+    cfg = load_config()
+    mode = resolve_output_mode(dry_run, output_path, open_github_pr)
+
+    # Validate GitHub config upfront — fail fast before expensive API calls
+    github_token = None
+    target_repo = None
+    if mode.github:
+        try:
+            github_token = get_github_token(cfg)
+        except ValueError as e:
+            print_error(str(e))
+            sys.exit(1)
+        target_repo = cfg.get("github", {}).get("default_repo", "")
+        if not target_repo:
+            print_error(
+                "No GitHub repo configured.\n"
+                "  Run: iam-zero configure"
+            )
+            sys.exit(1)
+
+    if mode.is_dry_run:
         print_dry_run_notice()
 
     print_header(f"iam-zero GCP scan: {service_account}")
@@ -342,92 +347,47 @@ def scan_gcp(service_account, project, days, repo, dry_run):
 
     print_permission_table(findings)
 
-    # 4. Generate minimal bindings
+    # 4. Generate bindings
     from .gcp.policy_generator import generate_minimal_bindings
     current_bindings_json = json.dumps(
         {"serviceAccount": service_account, "currentRoles": current_roles}, indent=2
     )
     new_bindings_json = generate_minimal_bindings(service_account, current_roles, findings)
 
-    if dry_run:
-        console.print("\n[bold]--- Current bindings ---[/bold]")
-        console.print(current_bindings_json)
-        console.print("\n[bold]--- Proposed minimal bindings ---[/bold]")
-        console.print(new_bindings_json)
+    # 5. Output
+    if mode.is_dry_run:
+        print_policy_terminal(current_bindings_json, new_bindings_json)
         sys.exit(0)
 
-    # 5. Open PR
-    target_repo = repo or cfg.get("github", {}).get("default_repo", "")
-    if not target_repo:
-        print_error(
-            "No GitHub repo configured.\n"
-            "  Run: iam-zero configure\n"
-            "  Or pass: --repo owner/repo"
-        )
-        sys.exit(1)
+    if mode.file_path:
+        try:
+            write_policy_file(mode.file_path, new_bindings_json)
+            print_output_written(mode.file_path)
+        except OSError as e:
+            print_error(f"Failed to write policy file: {e}")
+            sys.exit(1)
 
-    try:
-        github_token = get_github_token(cfg)
-        from .shared.pr import open_pr
+    if mode.github:
         sa_short = service_account.split("@")[0]
-        pr_url = open_pr(
-            github_token=github_token,
-            repo_name=target_repo,
-            cloud="gcp",
-            identity=service_account,
-            identity_short=sa_short,
-            findings=findings,
-            current_policy=current_bindings_json,
-            new_policy=new_bindings_json,
-            days=days,
-            branch_name=f"iam-zero/gcp-{sa_short}",
-            dry_run=dry_run,
-        )
-    except (ValueError, RuntimeError) as e:
-        print_error(str(e))
-        sys.exit(1)
+        try:
+            from .shared.pr import open_pr
+            pr_url = open_pr(
+                github_token=github_token,
+                repo_name=target_repo,
+                cloud="gcp",
+                identity=service_account,
+                identity_short=sa_short,
+                findings=findings,
+                current_policy=current_bindings_json,
+                new_policy=new_bindings_json,
+                days=days,
+                branch_name=f"iam-zero/gcp-{sa_short}",
+            )
+        except RuntimeError as e:
+            print_error(str(e))
+            sys.exit(1)
 
-    if pr_url:
-        print_success(f"PR opened: {pr_url}")
-    else:
-        print_warning("A PR for this service account already exists.")
-
-
-# ---------------------------------------------------------------------------
-# report gcp
-# ---------------------------------------------------------------------------
-
-@report.command("gcp")
-@click.option("--service-account", "service_account", required=True)
-@click.option("--project", required=True)
-@click.option("--days", default=90, show_default=True)
-def report_gcp(service_account, project, days):
-    """Print unused roles for a GCP service account — no PR opened."""
-    cfg = load_config()
-    print_header(f"iam-zero GCP report: {service_account}")
-
-    try:
-        from .gcp.audit_logs import fetch_used_methods
-        from .gcp.iam_analyzer import get_service_account_roles, compute_unused_roles
-        used_methods = fetch_used_methods(service_account, project, days)
-        current_roles = get_service_account_roles(service_account, project)
-        unused_roles = compute_unused_roles(current_roles, used_methods)
-    except (PermissionError, RuntimeError) as e:
-        print_error(str(e))
-        sys.exit(1)
-
-    if not unused_roles:
-        print_success("No unused roles found.")
-        return
-
-    try:
-        api_key = get_anthropic_api_key(cfg)
-        ai = anthropic.Anthropic(api_key=api_key)
-        from .agent.analyst import analyze_gcp_permissions
-        findings = analyze_gcp_permissions(
-            ai, service_account, current_roles, list(used_methods), unused_roles, days
-        )
-        print_permission_table(findings)
-    except Exception as e:
-        print_error(f"Analysis failed: {e}")
-        sys.exit(1)
+        if pr_url:
+            print_success(f"PR opened: {pr_url}")
+        else:
+            print_warning("A PR for this service account already exists.")

@@ -82,13 +82,9 @@ def open_pr(
     days: int,
     branch_name: str,
     base_branch: str = "main",
-    dry_run: bool = False,
 ) -> str | None:
     title = f"fix(iam): tighten permissions for {identity_short} [{cloud}]"
     body = _build_pr_body(cloud, identity, findings, current_policy, new_policy, days)
-
-    if dry_run:
-        return None
 
     gh = Github(github_token)
     try:
