@@ -1,45 +1,128 @@
-# iam-zero
+# iam-zero ⚡
 
-Detect overpermissive IAM roles on AWS and GCP, then automatically open PRs with tightened least-privilege policies.
+> Detect overpermissive IAM roles on AWS and GCP. Auto-generate least-privilege policies. Open PRs — not tickets.
 
-**How it works:** iam-zero reads your actual audit logs (CloudTrail / Cloud Audit Logs), figures out which permissions are really used, uses Claude to assess removal safety, and raises a PR — so humans review before anything changes.
+Most IAM roles are massively over-permissioned. iam-zero reads your actual audit logs, figures out what permissions are *really* used, and opens a PR with a tightened policy — so a human reviews before anything changes.
+
+---
+
+## How it works
+
+```text
+CloudTrail / Cloud Audit Logs
+        ↓
+  What did this role actually call in the last 90 days?
+        ↓
+  Claude reasons: safe to remove vs. risky
+        ↓
+  Minimal policy generated
+        ↓
+  PR opened with before/after diff
+```
+
+No agents writing IAM policies directly. No surprises. Everything goes through code review.
+
+---
+
+## Install
+
+```bash
+pip install iam-zero
+```
 
 ---
 
 ## Quickstart
 
-### Install
-
-```bash
-# Homebrew (coming soon)
-brew tap MaripeddiSupraj/tap
-brew install iam-zero
-
-# PyPI
-pip install iam-zero
-```
-
-### Configure
+### 1. Configure
 
 ```bash
 iam-zero configure
-# prompts for: GitHub PAT, default repo, Anthropic API key
+# Prompts for Anthropic API key (required) + GitHub token (optional, for PRs)
 ```
 
-### AWS
+### 2. Enable GCP APIs (one-time)
 
 ```bash
-# Scan a specific role and open a PR
-iam-zero scan aws --role arn:aws:iam::123456789012:role/my-role --days 90
-
-# Preview what the PR would say (no PR opened)
-iam-zero scan aws --role arn:aws:iam::123456789012:role/my-role --dry-run
-
-# Just print the analysis to the terminal
-iam-zero report aws --role arn:aws:iam::123456789012:role/my-role
+gcloud services enable \
+  cloudresourcemanager.googleapis.com \
+  logging.googleapis.com \
+  iam.googleapis.com \
+  --project YOUR-PROJECT
 ```
 
-**Required AWS permissions for your caller identity:**
+### 3. Scan
+
+```bash
+# GCP — dry run (safe, no side effects)
+iam-zero scan gcp \
+  --service-account sa@my-project.iam.gserviceaccount.com \
+  --project my-project
+
+# AWS — dry run
+iam-zero scan aws --role arn:aws:iam::123456789012:role/my-role
+```
+
+---
+
+## Output modes
+
+| Flag | What happens |
+| ---- | ------------ |
+| *(none)* | Dry run — findings printed to terminal, nothing written |
+| `--dry-run` | Same, explicit |
+| `--output policy.json` | Writes recommended policy to a file |
+| `--github` | Opens a GitHub PR with full before/after diff |
+| `--output policy.json --github` | Both |
+
+`--dry-run` always takes priority. Safe by default.
+
+---
+
+## What the output looks like
+
+```text
+╭──────────────────────────────────────────────╮
+│  iam-zero ⚡  IAM Least-Privilege Scanner    │
+╰──────────────────────────────────────────────╯
+
+  Provider    GCP
+  Identity    terraform-review-sa@my-project.iam.gserviceaccount.com
+  Project     my-project
+  Lookback    90 days
+  Mode        dry-run
+
+  ✓  Fetching IAM role bindings  [4 roles]
+  ✓  Reading Cloud Audit Logs    [1,204 unique methods]
+  ✓  Claude analysis complete
+
+  Permission                   Last Seen    Risk   Recommendation
+  ───────────────────────────────────────────────────────────────
+  roles/editor                 Never        HIGH   ✋ Keep (risky)
+  roles/storage.objectAdmin    Never        LOW    ✂  Remove
+  roles/logging.viewer         Never        LOW    ✂  Remove
+  roles/iam.serviceAccountUser 3 days ago   —      ✓  Keep (active)
+
+  ╭─ Summary ────────────────────────────────╮
+  │  2 permissions safe to remove            │
+  │  1 flagged for manual review             │
+  │  1 active — kept untouched               │
+  │                                          │
+  │  Blast radius reduction:  50%            │
+  ╰──────────────────────────────────────────╯
+```
+
+---
+
+## Required permissions
+
+### GCP (your caller identity)
+
+- `resourcemanager.projects.getIamPolicy`
+- `logging.logEntries.list`
+
+### AWS (your caller identity)
+
 - `cloudtrail:LookupEvents`
 - `iam:GetRole`
 - `iam:ListAttachedRolePolicies`
@@ -48,59 +131,14 @@ iam-zero report aws --role arn:aws:iam::123456789012:role/my-role
 - `iam:ListRolePolicies`
 - `iam:GetRolePolicy`
 
-### GCP
-
-```bash
-# Authenticate first
-gcloud auth application-default login
-
-# Scan a service account and open a PR
-iam-zero scan gcp \
-  --service-account sa@my-project.iam.gserviceaccount.com \
-  --project my-project \
-  --days 90
-
-# Preview (no PR)
-iam-zero scan gcp \
-  --service-account sa@my-project.iam.gserviceaccount.com \
-  --project my-project \
-  --dry-run
-
-# Just print the analysis
-iam-zero report gcp \
-  --service-account sa@my-project.iam.gserviceaccount.com \
-  --project my-project
-```
-
-**Required GCP permissions for your caller identity:**
-- `logging.logEntries.list`
-- `iam.roles.get`
-- `resourcemanager.projects.getIamPolicy`
-
-### Test credentials
-
-```bash
-iam-zero auth test --project my-gcp-project
-```
-
 ---
 
-## How it works (in detail)
+## Safety
 
-1. **Fetch audit logs** — CloudTrail (AWS) or Cloud Audit Logs (GCP) for the last N days
-2. **Fetch current policy** — attached IAM policies or role bindings
-3. **Diff** — which permissions are granted but never used?
-4. **Claude analysis** — for each unused permission, is it safe to remove? (considers DR, infrequent processes)
-5. **Generate minimal policy** — only what's actually needed
-6. **Open PR** — before/after diff, per-permission rationale, idempotent (won't duplicate if PR already open)
-
----
-
-## Safety guarantees
-
-- **Read-only** — iam-zero never touches your IAM policies directly
-- **Dry run** — `--dry-run` on every scan command
-- **Human in the loop** — everything goes through a PR review before any change
+- **Read-only** — never modifies IAM policies directly
+- **Dry run by default** — zero side effects unless you pass `--output` or `--github`
+- **Human in the loop** — all changes go through a PR before anything is applied
+- **Idempotent** — won't open a duplicate PR if one already exists for this identity
 
 ---
 
@@ -109,10 +147,21 @@ iam-zero auth test --project my-gcp-project
 ```bash
 git clone https://github.com/MaripeddiSupraj/iam-zero
 cd iam-zero
-python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 pytest
 ```
+
+---
+
+## Roadmap
+
+- [x] GCP service account scanning
+- [x] AWS IAM role scanning
+- [x] Claude-powered safe-removal analysis
+- [x] GitHub PR output
+- [ ] `--all-service-accounts` / `--all-roles` bulk scanning
+- [ ] Homebrew install
+- [ ] CI exit code for policy drift detection
 
 ---
 

@@ -1,4 +1,4 @@
-from google.cloud import resourcemanager_v3, iam_admin_v1
+from google.cloud import resourcemanager_v3
 from google.api_core.exceptions import PermissionDenied, GoogleAPICallError
 
 
@@ -32,19 +32,6 @@ def get_service_account_roles(
             roles.append(binding.role)
     return sorted(roles)
 
-
-def get_role_permissions(role_id: str) -> list[str]:
-    """
-    Returns the list of permissions included in a GCP role.
-    Handles both predefined roles (roles/...) and custom roles (projects/.../roles/...).
-    """
-    iam_client = iam_admin_v1.IAMClient()
-    try:
-        role = iam_client.get_role(name=role_id)
-        return list(role.included_permissions)
-    except GoogleAPICallError:
-        # Non-fatal — return empty for roles we can't introspect
-        return []
 
 
 def compute_unused_roles(

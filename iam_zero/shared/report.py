@@ -24,9 +24,10 @@ def print_banner(
     project: str | None = None,
 ) -> None:
     title = Text()
-    title.append("  iam-zero ⚡  ", style="bold cyan")
-    title.append("IAM Least-Privilege Scanner", style="bold white")
-    console.print(Panel(title, box=box.ROUNDED, padding=(0, 1)))
+    title.append("  iam-zero ", style="bold yellow")
+    title.append("⚡ ", style="bold orange1")
+    title.append("IAM Least-Privilege Scanner  ", style="bold")
+    console.print(Panel(title, box=box.ROUNDED, border_style="yellow", padding=(0, 1)))
     console.print()
 
     rows: list[tuple[str, str]] = [("Provider", provider), ("Identity", identity)]
@@ -35,7 +36,11 @@ def print_banner(
     rows.extend([("Lookback", f"{days} days"), ("Mode", mode)])
 
     for label, value in rows:
-        console.print(f"  [dim]{label:<12}[/dim]{value}")
+        if label == "Mode":
+            val_markup = f"[bold yellow]{value}[/bold yellow]" if value == "dry-run" else f"[bold green]{value}[/bold green]"
+        else:
+            val_markup = f"[bold]{value}[/bold]"
+        console.print(f"  [dim]{label:<12}[/dim]{val_markup}")
     console.print()
 
 

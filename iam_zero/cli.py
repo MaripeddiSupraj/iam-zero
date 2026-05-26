@@ -16,7 +16,6 @@ from .shared.report import (
     print_pr_opened,
     print_policy_terminal,
     print_success,
-    print_warning,
     print_error,
 )
 
@@ -44,27 +43,29 @@ def cli():
 
 @cli.command()
 def configure():
-    """Interactive setup: GitHub token, Anthropic key, default repo."""
+    """Interactive setup: Anthropic key (required) + GitHub token/repo (optional, only for --github)."""
     cfg = load_config()
     console.print("[bold]iam-zero configuration[/bold]\n")
 
-    github_token = click.prompt(
-        "GitHub Personal Access Token (repo scope)",
-        default=cfg.get("github", {}).get("token", ""),
-        hide_input=True,
-    )
-    default_repo = click.prompt(
-        "Default GitHub repo for PRs (owner/repo)",
-        default=cfg.get("github", {}).get("default_repo", ""),
-    )
     anthropic_key = click.prompt(
         "Anthropic API key",
         default=cfg.get("anthropic", {}).get("api_key", ""),
         hide_input=True,
     )
 
-    cfg["github"] = {"token": github_token, "default_repo": default_repo}
+    console.print("\n  [dim]GitHub is only needed for --github (open PRs). Press Enter to skip.[/dim]")
+    github_token = click.prompt(
+        "GitHub Personal Access Token (repo scope) [optional]",
+        default=cfg.get("github", {}).get("token", ""),
+        hide_input=True,
+    )
+    default_repo = click.prompt(
+        "Default GitHub repo for PRs (owner/repo) [optional]",
+        default=cfg.get("github", {}).get("default_repo", ""),
+    )
+
     cfg["anthropic"] = {"api_key": anthropic_key}
+    cfg["github"] = {"token": github_token, "default_repo": default_repo}
     save_config(cfg)
     print_success("Configuration saved to ~/.iam-zero/config.toml")
 
@@ -82,17 +83,25 @@ def auth():
 @click.option("--profile", default=None, help="AWS profile name")
 @click.option("--project", default=None, help="GCP project ID")
 def auth_test(profile, project):
-    """Verify AWS + GCP credentials work."""
-    try:
-        import boto3
-        session = boto3.Session(profile_name=profile)
-        sts = session.client("sts")
-        identity = sts.get_caller_identity()
-        print_success(f"AWS authenticated as {identity['Arn']}")
-    except Exception as e:
-        print_error(f"AWS authentication failed\n  {e}")
+    """Verify cloud credentials.
 
-    if project:
+    Pass --project to test GCP. Pass --profile to test a specific AWS profile.
+    If neither is passed, both clouds are tested.
+    """
+    test_aws = profile is not None or project is None
+    test_gcp = project is not None
+
+    if test_aws:
+        try:
+            import boto3
+            session = boto3.Session(profile_name=profile)
+            sts = session.client("sts")
+            identity = sts.get_caller_identity()
+            print_success(f"AWS authenticated as {identity['Arn']}")
+        except Exception as e:
+            print_error(f"AWS authentication failed\n  {e}")
+
+    if test_gcp:
         try:
             from google.cloud import resourcemanager_v3
             rm = resourcemanager_v3.ProjectsClient()
@@ -105,8 +114,6 @@ def auth_test(profile, project):
                 f"  Fix: run  gcloud auth application-default login\n"
                 f"  Docs: https://github.com/MaripeddiSupraj/iam-zero#gcp-auth"
             )
-    else:
-        print_warning("GCP: pass --project <id> to test GCP auth")
 
 
 # ---------------------------------------------------------------------------
