@@ -32,7 +32,8 @@ iam-zero configure
 This will prompt you for:
 
 - **Anthropic API key** &mdash; required for Claude-powered analysis
-- **GitHub token** (optional) &mdash; needed only if you want PR output
+- **GitHub personal access token** (optional) &mdash; needed only for `--github` mode
+- **Default repo** (owner/repo) (optional) &mdash; needed only for `--github` mode
 
 ## 3. Enable Cloud APIs
 

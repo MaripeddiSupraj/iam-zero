@@ -2,12 +2,11 @@
 
 ## `iam-zero configure`
 
-Interactive setup wizard. Prompts for:
+Prompts for:
 
-- Anthropic API key
-- GitHub token (for PR output)
-- Default AWS profile
-- Default GCP project
+- **Anthropic API key** &mdash; required for analysis
+- **GitHub personal access token** &mdash; optional, only needed for `--github` mode
+- **Default repo** (owner/repo) &mdash; optional, only needed for `--github` mode
 
 ```bash
 iam-zero configure
@@ -15,14 +14,22 @@ iam-zero configure
 
 ## `iam-zero auth test`
 
-Verifies your credentials have the required permissions for each provider.
+Verifies your cloud credentials are working.
+
+| Option | Description |
+|--------|-------------|
+| `--profile <name>` | AWS profile to test (optional) |
+| `--project <id>` | GCP project to test (optional) |
+
+If neither flag is passed, both AWS and GCP are tested.
 
 ```bash
+# Test both providers
 iam-zero auth test
 
-# Test specific provider
-iam-zero auth test --aws
-iam-zero auth test --gcp
+# Test specific providers
+iam-zero auth test --profile my-aws-profile
+iam-zero auth test --project my-gcp-project
 ```
 
 ## `iam-zero scan aws`
@@ -36,7 +43,7 @@ Scan an AWS IAM role for over-permissive policies.
 | `--role <arn>` | IAM role ARN to scan |
 | `--all-roles` | Scan every IAM role in the account |
 | `--profile <name>` | AWS profile to use |
-| `--region <region>` | CloudTrail region (default: us-east-1) |
+| `--region <region>` | CloudTrail region (default: session default region) |
 | `--days <n>` | Lookback period in days (max: 90) |
 | `--no-access-advisor` | Skip Access Advisor (not recommended) |
 
@@ -77,6 +84,8 @@ Scan a GCP service account.
 | `--project <id>` | GCP project ID |
 | `--key-file <path>` | Service account key file |
 | `--days <n>` | Lookback period in days |
+
+| `--project <id>` | GCP project ID (required) |
 
 ### Output flags
 

@@ -34,11 +34,20 @@ Your caller identity needs:
 
 ## How AWS Scanning Works
 
-1. **Fetch CloudTrail events** &mdash; retrieves management events for the target role over N days
-2. **Get Access Advisor data** &mdash; corroborates with service-level last-used information
-3. **Compare policies** &mdash; identifies permissions in the policy NOT seen in logs
-4. **Analyze** &mdash; Claude determines safe-to-remove candidates
-5. **Generate** &mdash; produces a minimal policy JSON
+1. **Fetch CloudTrail events** &mdash; paginates `LookupEvents` by `Username` (extracted from role ARN) over N days
+2. **Get IAM policies** &mdash; reads both managed and inline policies via `get_role_policies()`, extracts all allowed actions with wildcard expansion
+3. **Access Advisor** &mdash; calls `GenerateServiceLastAccessedDetails` with 60s polling timeout, protects actions whose service had recent activity
+4. **Compute unused** &mdash; `compute_unused()` returns actions in policy not in CloudTrail; wildcards always flagged; `protect_active_services()` splits protected vs truly unused
+5. **Claude analysis** &mdash; sends current vs used vs unused to `claude-sonnet-4-20250514` for structured JSON assessment
+6. **Generate policy** &mdash; `generate_minimal_policy()` keeps used + safe-to-keep actions, maps to original resources, adds `IamZeroReviewUnmappedActions` Sid for orphans
+
+## Listing Roles
+
+Use `--all-roles` to scan every IAM role in the account. Roles under the `/aws-service-role/` path are automatically skipped.
+
+```bash
+iam-zero scan aws --all-roles
+```
 
 ## Limitations
 

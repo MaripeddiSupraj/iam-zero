@@ -16,7 +16,11 @@ AWS (CloudTrail + IAM Access Advisor) and GCP (Cloud Audit Logs).
 
 ### What AI model does iam-zero use?
 
-Claude Sonnet 4 (claude-sonnet-4-20250514) from Anthropic. Claude is used only for the reasoning step &mdash; deciding which unused permissions are safe to remove.
+Claude Sonnet 4 (`claude-sonnet-4-20250514`) from Anthropic. Claude is used only for the reasoning step &mdash; deciding which unused permissions are safe to remove. The model is hardcoded and not configurable.
+
+### Does iam-zero use an agent framework?
+
+No. It uses the Anthropic Python SDK directly — no LangChain, no CrewAI, no agent frameworks.
 
 ## Usage
 
@@ -54,7 +58,7 @@ Your caller identity likely lacks one or more required IAM permissions. See the 
 
 ### I get "GCP authentication failed"
 
-Run `gcloud auth application-default login` to set up Application Default Credentials, or pass `--key-file` with a service account key path.
+Run `gcloud auth application-default login` to set up Application Default Credentials. The credentials need `resourcemanager.projects.getIamPolicy` and `logging.logEntries.list` on the target project.
 
 ### The tool says "No events found" for my role
 

@@ -10,14 +10,7 @@ Uses Application Default Credentials (ADC):
 gcloud auth application-default login
 ```
 
-Or use a service account key file directly:
-
-```bash
-iam-zero scan gcp \
-  --service-account sa@project.iam.gserviceaccount.com \
-  --project my-project \
-  --key-file ./service-account-key.json
-```
+The credentials must have `resourcemanager.projects.getIamPolicy` and `logging.logEntries.list` permissions on the target project.
 
 ## Required Permissions
 
@@ -42,11 +35,21 @@ gcloud services enable \
 
 ## How GCP Scanning Works
 
-1. **Fetch IAM bindings** &mdash; reads the project's IAM policy
-2. **Get Cloud Audit Logs** &mdash; retrieves Admin Activity and Data Access logs for the target SA
-3. **Compare** &mdash; identifies roles in the binding NOT exercised in logs
-4. **Analyze** &mdash; Claude determines safe-to-remove candidates
-5. **Generate** &mdash; produces updated IAM binding recommendations
+1. **List service accounts** (for `--all-service-accounts`) &mdash; uses `IAMClient().list_service_accounts()` with `projects/{project}` parent
+2. **Fetch IAM bindings** &mdash; reads the project's IAM policy via `resourcemanager_v3.ProjectsClient().get_iam_policy()`, filters bindings where member matches `serviceAccount:{email}`
+3. **Get Cloud Audit Logs** &mdash; retrieves Admin Activity and Data Access logs for the target SA with `page_size=1000`
+4. **Extract method names** &mdash; parses `methodName` from `protoPayload`; handles both short form (`storage.buckets.list`) and fully-qualified protobuf form (`google.logging.v2.LoggingServiceV2.ListLogEntries`)
+5. **Compute unused** &mdash; `compute_unused_roles()` extracts service prefixes from used method names, compares against role service prefixes; primitive roles (no dot, e.g. `roles/viewer`) are always flagged
+6. **Analyze** &mdash; Claude determines safe-to-remove candidates
+7. **Generate** &mdash; `generate_minimal_bindings()` produces recommended roles JSON
+
+## Listing Service Accounts
+
+Use `--all-service-accounts` to scan every SA in the project:
+
+```bash
+iam-zero scan gcp --all-service-accounts --project my-project
+```
 
 ## Limitations
 

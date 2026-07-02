@@ -38,7 +38,11 @@ CI/CD applies the change
 
 ### Idempotent PRs
 
-Running the same scan twice won't create duplicate PRs. iam-zero checks for existing PRs before opening new ones.
+Running the same scan twice won't create duplicate PRs. iam-zero searches for existing open PRs matching the title prefix before creating a new one.
+
+### Protected Actions (AWS)
+
+IAM Access Advisor data is treated as ground truth for data-plane activity. Any action whose service namespace shows recent Access Advisor authentication is **hard-protected** — it can never be marked `remove`, even if Claude recommends otherwise. This is enforced in code after the API response is parsed.
 
 ## Limitations
 
