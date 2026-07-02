@@ -2,13 +2,21 @@
 
 > Detect overpermissive IAM roles on AWS and GCP. Auto-generate least-privilege policies. Open PRs — not tickets.
 
-Most IAM roles are massively over-permissioned. iam-zero reads your actual audit logs, figures out what permissions are *really* used, and opens a PR with a tightened policy — so a human reviews before anything changes.
+[![PyPI version](https://img.shields.io/pypi/v/iam-zero)](https://pypi.org/project/iam-zero/)
+[![Python versions](https://img.shields.io/pypi/pyversions/iam-zero)](https://pypi.org/project/iam-zero/)
+[![License](https://img.shields.io/github/license/MaripeddiSupraj/iam-zero)](LICENSE)
+
+Most IAM roles are massively over-permissioned. Teams either handcraft policies (slow, error-prone) or attach `AdministratorAccess` and pray. Neither scales.
+
+iam-zero reads your actual audit logs — CloudTrail for AWS, Cloud Audit Logs for GCP — figures out what permissions a role *actually* uses, and opens a GitHub PR with a tightened policy. A human reviews before anything changes.
+
+No agents writing IAM policies directly. No surprises. Everything goes through code review.
 
 ---
 
 ## How it works
 
-```text
+```
 CloudTrail / Cloud Audit Logs
         ↓
   What did this role actually call in the last 90 days?
@@ -20,70 +28,47 @@ CloudTrail / Cloud Audit Logs
   PR opened with before/after diff
 ```
 
-No agents writing IAM policies directly. No surprises. Everything goes through code review.
-
----
-
-## Install
-
-```bash
-pip install iam-zero
-```
-
 ---
 
 ## Quickstart
 
-### 1. Configure
-
 ```bash
+# 1. Install
+pip install iam-zero
+
+# 2. Configure (just your Anthropic key)
 iam-zero configure
-# Prompts for Anthropic API key (required) + GitHub token (optional, for PRs)
-```
 
-### 2. Enable GCP APIs (one-time)
+# 3. Scan a role — dry run by default, zero side effects
+iam-zero scan aws --role arn:aws:iam::123456789012:role/my-role
 
-```bash
-gcloud services enable \
-  cloudresourcemanager.googleapis.com \
-  logging.googleapis.com \
-  iam.googleapis.com \
-  --project YOUR-PROJECT
-```
-
-### 3. Scan
-
-```bash
-# GCP — dry run (safe, no side effects)
+# Or a GCP service account
 iam-zero scan gcp \
   --service-account sa@my-project.iam.gserviceaccount.com \
   --project my-project
-
-# AWS — dry run
-iam-zero scan aws --role arn:aws:iam::123456789012:role/my-role
 ```
 
 ---
 
 ## Output modes
 
-| Flag | What happens |
-| ---- | ------------ |
-| *(none)* | Dry run — findings printed to terminal, nothing written |
-| `--dry-run` | Same, explicit |
-| `--output policy.json` | Writes recommended policy to a file |
-| `--github` | Opens a GitHub PR with full before/after diff |
-| `--output policy.json --github` | Both |
-| `--region us-east-2` | CloudTrail region for the lookup (AWS only) |
-| `--no-access-advisor` | Skip IAM Access Advisor corroboration (AWS only, not recommended) |
+| Command | What happens |
+| ------- | ------------ |
+| `iam-zero scan aws --role <arn>` | **Dry run** — findings printed to terminal, nothing written |
+| `iam-zero scan aws --role <arn> --dry-run` | Same, explicit |
+| `iam-zero scan aws --role <arn> --output policy.json` | Writes recommended policy to a file |
+| `iam-zero scan aws --role <arn> --github` | Opens a GitHub PR with full before/after diff |
+| `iam-zero scan aws --role <arn> --output policy.json --github` | Both |
+| `iam-zero scan aws --role <arn> --region us-east-2` | Specify CloudTrail region (AWS only) |
+| `iam-zero scan aws --role <arn> --no-access-advisor` | Skip Access Advisor corroboration (AWS only) |
 
-`--dry-run` always takes priority. Safe by default.
+`--dry-run` always takes priority. **Safe by default.**
 
 ---
 
 ## What the output looks like
 
-```text
+```
 ╭──────────────────────────────────────────────╮
 │  iam-zero ⚡  IAM Least-Privilege Scanner    │
 ╰──────────────────────────────────────────────╯
@@ -118,11 +103,6 @@ iam-zero scan aws --role arn:aws:iam::123456789012:role/my-role
 
 ## Required permissions
 
-### GCP (your caller identity)
-
-- `resourcemanager.projects.getIamPolicy`
-- `logging.logEntries.list`
-
 ### AWS (your caller identity)
 
 - `cloudtrail:LookupEvents`
@@ -134,6 +114,23 @@ iam-zero scan aws --role arn:aws:iam::123456789012:role/my-role
 - `iam:GetPolicyVersion`
 - `iam:ListRolePolicies`
 - `iam:GetRolePolicy`
+
+### GCP (your caller identity)
+
+- `resourcemanager.projects.getIamPolicy`
+- `logging.logEntries.list`
+
+---
+
+## Safety guarantees
+
+- **Read-only** — never modifies IAM policies directly
+- **Dry run by default** — zero side effects unless you pass `--output` or `--github`
+- **Human in the loop** — all changes go through a PR before anything is applied
+- **Idempotent** — won't open a duplicate PR if one already exists for this identity
+- **PRs carry the artifact** — the recommended policy is committed as
+  `iam-zero/<cloud>/<identity>.recommended-policy.json` on the PR branch, so merging
+  puts the policy in your repo for your IaC pipeline to pick up
 
 ---
 
@@ -152,16 +149,6 @@ iam-zero scan aws --role arn:aws:iam::123456789012:role/my-role
   "investigate" for such roles, but enable Data Access logs for real signal.
 - **CloudTrail `LookupEvents` retains 90 days.** `--days` beyond 90 won't return more.
 
-## Safety
-
-- **Read-only** — never modifies IAM policies directly
-- **Dry run by default** — zero side effects unless you pass `--output` or `--github`
-- **Human in the loop** — all changes go through a PR before anything is applied
-- **Idempotent** — won't open a duplicate PR if one already exists for this identity
-- **PRs carry the artifact** — the recommended policy is committed as
-  `iam-zero/<cloud>/<identity>.recommended-policy.json` on the PR branch, so merging
-  puts the policy in your repo for your IaC pipeline to pick up
-
 ---
 
 ## Development
@@ -170,7 +157,7 @@ iam-zero scan aws --role arn:aws:iam::123456789012:role/my-role
 git clone https://github.com/MaripeddiSupraj/iam-zero
 cd iam-zero
 pip install -e ".[dev]"
-pytest
+pytest      # 57 tests, all pass
 ```
 
 ---
