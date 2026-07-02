@@ -126,11 +126,131 @@ def scan():
 
 
 # ---------------------------------------------------------------------------
-# scan aws
+# shared scan helpers
 # ---------------------------------------------------------------------------
 
+def _validate_github(cfg, mode) -> tuple[str, str]:
+    """Returns (token, target_repo). Exits on misconfiguration."""
+    if not mode.github:
+        return None, None
+    try:
+        token = get_github_token(cfg)
+    except ValueError as e:
+        print_error(str(e))
+        sys.exit(1)
+    repo = cfg.get("github", {}).get("default_repo", "")
+    if not repo:
+        print_error(
+            "No GitHub repo configured.\n"
+            "  Run: iam-zero configure"
+        )
+        sys.exit(1)
+    return token, repo
+
+
+def _print_bulk_header(cloud: str, identities: list[str], days: int, mode_label: str, project=None):
+    console.print()
+    console.print(f"[bold cyan]╭─{'─'*56}╮[/bold cyan]")
+    console.print(f"[bold cyan]│[/bold cyan]  [bold]iam-zero ⚡  Bulk {cloud.upper()} Scan[/bold]{' ' * (37 - len(cloud))}[bold cyan]│[/bold cyan]")
+    console.print(f"[bold cyan]╰─{'─'*56}╯[/bold cyan]")
+    console.print(f"  [bold]Provider[/bold]   {cloud.upper()}")
+    console.print(f"  [bold]Identities[/bold] {len(identities)} found")
+    if project:
+        console.print(f"  [bold]Project[/bold]   {project}")
+    console.print(f"  [bold]Lookback[/bold]  {days} days")
+    console.print(f"  [bold]Mode[/bold]      {mode_label}")
+    console.print()
+
+
+# ---------------------------------------------------------------------------
+# AWS scan
+# ---------------------------------------------------------------------------
+
+def _scan_aws_role(role_arn, days, profile, region, no_access_advisor, cfg, mode, ai, github_token, target_repo):
+    """Run the full scan pipeline for a single AWS role. Returns (role_arn, findings, active_actions, raw_docs, current_actions, used_actions) or None on unrecoverable error."""
+    from .aws.cloudtrail import fetch_used_actions
+    from .aws.iam_analyzer import get_role_policies, compute_unused
+    from .aws.access_advisor import fetch_service_last_accessed, protect_active_services
+    from .aws.policy_generator import generate_minimal_policy
+    from .agent.analyst import analyze_aws_permissions
+
+    with scan_step(f"CloudTrail — {role_arn.split('/')[-1]}") as detail:
+        used_actions = fetch_used_actions(role_arn, days, profile=profile, region=region)
+        detail(f"[{len(used_actions):,} actions]")
+
+    with scan_step(f"IAM policies — {role_arn.split('/')[-1]}") as detail:
+        current_actions, raw_docs = get_role_policies(role_arn, profile=profile)
+        detail(f"[{len(current_actions)} actions in policy]")
+
+    unused_actions = compute_unused(current_actions, used_actions)
+    active_actions = [a for a in current_actions if a in used_actions]
+
+    protected_actions: dict[str, str] = {}
+    if not no_access_advisor and unused_actions:
+        try:
+            with scan_step(f"Access Advisor — {role_arn.split('/')[-1]}") as detail:
+                service_last_accessed = fetch_service_last_accessed(role_arn, profile=profile)
+                unused_actions, protected_actions = protect_active_services(
+                    unused_actions, service_last_accessed
+                )
+                detail(f"[{len(protected_actions)} protected]")
+            unused_actions = sorted(set(unused_actions) | set(protected_actions))
+        except (PermissionError, Exception):
+            pass
+
+    if not unused_actions:
+        console.print(f"  [dim]✓ {role_arn.split('/')[-1]} — well-scoped, nothing to tighten[/dim]")
+        return None
+
+    with scan_step(f"Claude — {role_arn.split('/')[-1]}") as detail:
+        findings = analyze_aws_permissions(
+            ai, role_arn, current_actions, list(used_actions), unused_actions, days,
+            protected_actions=protected_actions,
+        )
+        detail("done")
+
+    current_policy_json = json.dumps(
+        {
+            "Version": "2012-10-17",
+            "Statement": [s for doc in raw_docs for s in doc.get("Statement", [])],
+        },
+        indent=2,
+    )
+    new_policy_json = generate_minimal_policy(used_actions, findings, raw_docs)
+
+    if mode.file_path:
+        try:
+            write_policy_file(mode.file_path, new_policy_json)
+            print_file_written(mode.file_path, "aws", identity=role_arn)
+        except OSError as e:
+            print_error(f"Failed to write policy file\n  {e}")
+
+    if mode.github:
+        role_short = role_arn.split("/")[-1]
+        try:
+            from .shared.pr import open_pr
+            pr_url, is_new = open_pr(
+                github_token=github_token,
+                repo_name=target_repo,
+                cloud="aws",
+                identity=role_arn,
+                identity_short=role_short,
+                findings=findings,
+                current_policy=current_policy_json,
+                new_policy=new_policy_json,
+                days=days,
+                branch_name=f"iam-zero/aws-{role_short}",
+            )
+            print_pr_opened(pr_url, f"fix(iam): tighten permissions for {role_short} [aws]", is_new=is_new)
+        except RuntimeError as e:
+            print_error(str(e))
+
+    return (role_arn, findings, active_actions, raw_docs, current_actions, used_actions)
+
+
 @scan.command("aws")
-@click.option("--role", "role_arn", required=True, help="IAM role ARN to scan")
+@click.option("--role", "role_arn", default=None, help="IAM role ARN to scan")
+@click.option("--all-roles", is_flag=True, default=False, help="Scan every IAM role in the account")
 @click.option("--days", default=90, show_default=True, help="Look-back window in days")
 @click.option("--profile", default=None, help="AWS profile name")
 @click.option("--region", default=None,
@@ -143,58 +263,60 @@ def scan():
               help="Write recommended policy JSON to this file")
 @click.option("--github", "open_github_pr", is_flag=True, default=False,
               help="Open a GitHub PR (requires token + repo in config)")
-def scan_aws(role_arn, days, profile, region, no_access_advisor, dry_run, output_path, open_github_pr):
-    """Scan an AWS IAM role and output a least-privilege policy.
+def scan_aws(role_arn, all_roles, days, profile, region, no_access_advisor, dry_run, output_path, open_github_pr):
+    """Scan AWS IAM roles and output least-privilege policies.
+
+    Pass --role for a single role, or --all-roles to scan every role in the account.
 
     Default (no flags): dry-run — prints findings to terminal, no side effects.
     """
+    if not role_arn and not all_roles:
+        print_error("Pass --role <arn> to scan one role, or --all-roles to scan all roles in the account")
+        sys.exit(1)
+    if role_arn and all_roles:
+        print_error("Use either --role or --all-roles, not both")
+        sys.exit(1)
+
     cfg = load_config()
     mode = resolve_output_mode(dry_run, output_path, open_github_pr)
+    github_token, target_repo = _validate_github(cfg, mode)
+    api_key = get_anthropic_api_key(cfg)
+    ai = anthropic.Anthropic(api_key=api_key)
 
-    # Validate GitHub config before any expensive API calls
-    github_token = None
-    target_repo = None
-    if mode.github:
-        try:
-            github_token = get_github_token(cfg)
-        except ValueError as e:
-            print_error(str(e))
-            sys.exit(1)
-        target_repo = cfg.get("github", {}).get("default_repo", "")
-        if not target_repo:
-            print_error(
-                "No GitHub repo configured.\n"
-                "  Run: iam-zero configure"
-            )
-            sys.exit(1)
+    if all_roles:
+        from .aws.iam_analyzer import list_roles
+        with scan_step("Listing all IAM roles") as detail:
+            identities = list_roles(profile=profile)
+            detail(f"[{len(identities)} roles found]")
+        _print_bulk_header("AWS", identities, days, _mode_label(mode))
+        results = []
+        for arn in identities:
+            r = _scan_aws_role(arn, days, profile, region, no_access_advisor, cfg, mode, ai, github_token, target_repo)
+            if r:
+                results.append(r)
+        if not results:
+            print_success("No roles need tightening — all well-scoped.")
+            return
+        console.print(f"\n  [bold]Summary:[/bold] {len(results)} role(s) with tightening opportunities\n")
+        for (arn, findings, active, *_rest) in results:
+            to_remove = sum(1 for f in findings if f.get("recommendation", "").lower() == "remove")
+            console.print(f"  [bold]{arn.split('/')[-1]}[/bold] — {len(findings)} unused, {to_remove} removable")
+        return
+
+    # Single role
+    github_token, target_repo = _validate_github(cfg, mode)
 
     print_banner("AWS", role_arn, days, _mode_label(mode))
 
-    # 1. Fetch CloudTrail events
-    try:
-        from .aws.cloudtrail import fetch_used_actions
-        with scan_step("Reading CloudTrail events") as detail:
-            used_actions = fetch_used_actions(role_arn, days, profile=profile, region=region)
-            detail(f"[{len(used_actions):,} unique actions]")
-    except PermissionError as e:
-        print_error(str(e))
-        sys.exit(1)
-    except Exception as e:
-        print_error(f"Unexpected error fetching CloudTrail events\n  {e}")
-        sys.exit(1)
+    from .aws.cloudtrail import fetch_used_actions
+    with scan_step("Reading CloudTrail events") as detail:
+        used_actions = fetch_used_actions(role_arn, days, profile=profile, region=region)
+        detail(f"[{len(used_actions):,} unique actions]")
 
-    # 2. Fetch current IAM policies
-    try:
-        from .aws.iam_analyzer import get_role_policies, compute_unused
-        with scan_step("Fetching IAM role policies") as detail:
-            current_actions, raw_docs = get_role_policies(role_arn, profile=profile)
-            detail(f"[{len(current_actions)} actions in policy]")
-    except PermissionError as e:
-        print_error(str(e))
-        sys.exit(1)
-    except Exception as e:
-        print_error(f"Unexpected error fetching IAM policies\n  {e}")
-        sys.exit(1)
+    from .aws.iam_analyzer import get_role_policies, compute_unused
+    with scan_step("Fetching IAM role policies") as detail:
+        current_actions, raw_docs = get_role_policies(role_arn, profile=profile)
+        detail(f"[{len(current_actions)} actions in policy]")
 
     unused_actions = compute_unused(current_actions, used_actions)
     active_actions = [a for a in current_actions if a in used_actions]
@@ -203,10 +325,6 @@ def scan_aws(role_arn, days, profile, region, no_access_advisor, dry_run, output
         print_success("No unused permissions found — this role looks well-scoped already.")
         sys.exit(0)
 
-    # 2b. Access Advisor corroboration — CloudTrail LookupEvents misses all
-    # data-plane events; Access Advisor tells us which services actually
-    # authenticated, so we never recommend removing an action whose service
-    # is demonstrably active.
     protected_actions: dict[str, str] = {}
     if not no_access_advisor:
         try:
@@ -224,30 +342,17 @@ def scan_aws(role_arn, days, profile, region, no_access_advisor, dry_run, output
         except Exception as e:
             console.print(f"  [yellow]⚠  Access Advisor failed ({e}) — continuing without it[/yellow]")
 
-    # 3. Claude analysis
-    try:
-        api_key = get_anthropic_api_key(cfg)
-        ai = anthropic.Anthropic(api_key=api_key)
-        from .agent.analyst import analyze_aws_permissions
-        with scan_step("Claude reasoning about safe removals") as detail:
-            findings = analyze_aws_permissions(
-                ai, role_arn, current_actions, list(used_actions), unused_actions, days,
-                protected_actions=protected_actions,
-            )
-            detail("Analysis complete")
-    except ValueError as e:
-        print_error(str(e))
-        sys.exit(1)
-    except Exception as e:
-        print_error(f"Claude analysis failed\n  {e}")
-        sys.exit(1)
+    from .agent.analyst import analyze_aws_permissions
+    with scan_step("Claude reasoning about safe removals") as detail:
+        findings = analyze_aws_permissions(
+            ai, role_arn, current_actions, list(used_actions), unused_actions, days,
+            protected_actions=protected_actions,
+        )
+        detail("Analysis complete")
 
     console.print()
-
-    # 4. Display findings
     print_findings_table(findings, active_actions, item_label="Permission")
 
-    # 5. Generate policies
     from .aws.policy_generator import generate_minimal_policy
     current_policy_json = json.dumps(
         {
@@ -258,7 +363,6 @@ def scan_aws(role_arn, days, profile, region, no_access_advisor, dry_run, output
     )
     new_policy_json = generate_minimal_policy(used_actions, findings, raw_docs)
 
-    # 6. Output
     if mode.is_dry_run:
         print_policy_terminal(current_policy_json, new_policy_json)
         print_summary_panel(
@@ -277,7 +381,6 @@ def scan_aws(role_arn, days, profile, region, no_access_advisor, dry_run, output
 
     if mode.github:
         role_short = role_arn.split("/")[-1]
-        title = f"fix(iam): tighten permissions for {role_short} [aws]"
         try:
             from .shared.pr import open_pr
             pr_url, is_new = open_pr(
@@ -292,7 +395,7 @@ def scan_aws(role_arn, days, profile, region, no_access_advisor, dry_run, output
                 days=days,
                 branch_name=f"iam-zero/aws-{role_short}",
             )
-            print_pr_opened(pr_url, title, is_new=is_new)
+            print_pr_opened(pr_url, f"fix(iam): tighten permissions for {role_short} [aws]", is_new=is_new)
         except RuntimeError as e:
             print_error(str(e))
             sys.exit(1)
@@ -306,12 +409,76 @@ def scan_aws(role_arn, days, profile, region, no_access_advisor, dry_run, output
 
 
 # ---------------------------------------------------------------------------
-# scan gcp
+# GCP scan
 # ---------------------------------------------------------------------------
 
+def _scan_gcp_sa(service_account, project, days, cfg, mode, ai, github_token, target_repo):
+    """Run the full scan pipeline for a single GCP service account."""
+    from .gcp.iam_analyzer import get_service_account_roles, compute_unused_roles
+    from .gcp.audit_logs import fetch_used_methods
+    from .gcp.policy_generator import generate_minimal_bindings
+    from .agent.analyst import analyze_gcp_permissions
+
+    sa_short = service_account.split("@")[0]
+
+    with scan_step(f"IAM bindings — {sa_short}") as detail:
+        current_roles = get_service_account_roles(service_account, project)
+        detail(f"[{len(current_roles)} roles]")
+
+    with scan_step(f"Audit Logs — {sa_short}") as detail:
+        used_methods = fetch_used_methods(service_account, project, days)
+        detail(f"[{len(used_methods):,} methods]")
+
+    unused_roles = compute_unused_roles(current_roles, used_methods)
+    active_roles = [r for r in current_roles if r not in set(unused_roles)]
+
+    if not unused_roles:
+        console.print(f"  [dim]✓ {sa_short} — well-scoped, nothing to tighten[/dim]")
+        return None
+
+    with scan_step(f"Claude — {sa_short}") as detail:
+        findings = analyze_gcp_permissions(
+            ai, service_account, current_roles, list(used_methods), unused_roles, days
+        )
+        detail("done")
+
+    current_bindings_json = json.dumps(
+        {"serviceAccount": service_account, "currentRoles": current_roles}, indent=2
+    )
+    new_bindings_json = generate_minimal_bindings(service_account, current_roles, findings)
+
+    if mode.file_path:
+        try:
+            write_policy_file(mode.file_path, new_bindings_json)
+            print_file_written(mode.file_path, "gcp", project=project, identity=service_account)
+        except OSError as e:
+            print_error(f"Failed to write policy file\n  {e}")
+
+    if mode.github:
+        try:
+            from .shared.pr import open_pr
+            pr_url, is_new = open_pr(
+                github_token=github_token,
+                repo_name=target_repo,
+                cloud="gcp",
+                identity=service_account,
+                identity_short=sa_short,
+                findings=findings,
+                current_policy=current_bindings_json,
+                new_policy=new_bindings_json,
+                days=days,
+                branch_name=f"iam-zero/gcp-{sa_short}",
+            )
+            print_pr_opened(pr_url, f"fix(iam): tighten permissions for {sa_short} [gcp]", is_new=is_new)
+        except RuntimeError as e:
+            print_error(str(e))
+
+    return (service_account, findings, active_roles, current_roles, used_methods)
+
+
 @scan.command("gcp")
-@click.option("--service-account", "service_account", required=True,
-              help="Service account email")
+@click.option("--service-account", "service_account", default=None, help="Service account email")
+@click.option("--all-service-accounts", is_flag=True, default=False, help="Scan all service accounts in the project")
 @click.option("--project", required=True, help="GCP project ID")
 @click.option("--days", default=90, show_default=True)
 @click.option("--dry-run", is_flag=True, default=False,
@@ -320,58 +487,58 @@ def scan_aws(role_arn, days, profile, region, no_access_advisor, dry_run, output
               help="Write recommended policy JSON to this file")
 @click.option("--github", "open_github_pr", is_flag=True, default=False,
               help="Open a GitHub PR (requires token + repo in config)")
-def scan_gcp(service_account, project, days, dry_run, output_path, open_github_pr):
-    """Scan a GCP service account and output a least-privilege policy.
+def scan_gcp(service_account, all_service_accounts, project, days, dry_run, output_path, open_github_pr):
+    """Scan GCP service accounts and output least-privilege policies.
+
+    Pass --service-account for one SA, or --all-service-accounts to scan every SA in the project.
 
     Default (no flags): dry-run — prints findings to terminal, no side effects.
     """
+    if not service_account and not all_service_accounts:
+        print_error("Pass --service-account <email> to scan one SA, or --all-service-accounts to scan all")
+        sys.exit(1)
+    if service_account and all_service_accounts:
+        print_error("Use either --service-account or --all-service-accounts, not both")
+        sys.exit(1)
+
     cfg = load_config()
     mode = resolve_output_mode(dry_run, output_path, open_github_pr)
+    github_token, target_repo = _validate_github(cfg, mode)
+    api_key = get_anthropic_api_key(cfg)
+    ai = anthropic.Anthropic(api_key=api_key)
 
-    # Validate GitHub config before any expensive API calls
-    github_token = None
-    target_repo = None
-    if mode.github:
-        try:
-            github_token = get_github_token(cfg)
-        except ValueError as e:
-            print_error(str(e))
-            sys.exit(1)
-        target_repo = cfg.get("github", {}).get("default_repo", "")
-        if not target_repo:
-            print_error(
-                "No GitHub repo configured.\n"
-                "  Run: iam-zero configure"
-            )
-            sys.exit(1)
+    if all_service_accounts:
+        from .gcp.iam_analyzer import list_service_accounts
+        with scan_step("Listing all service accounts") as detail:
+            identities = list_service_accounts(project)
+            detail(f"[{len(identities)} SAs found]")
+        _print_bulk_header("GCP", identities, days, _mode_label(mode), project=project)
+        results = []
+        for sa in identities:
+            r = _scan_gcp_sa(sa, project, days, cfg, mode, ai, github_token, target_repo)
+            if r:
+                results.append(r)
+        if not results:
+            print_success("No service accounts need tightening — all well-scoped.")
+            return
+        console.print(f"\n  [bold]Summary:[/bold] {len(results)} service account(s) with tightening opportunities\n")
+        for (sa, findings, *_) in results:
+            to_remove = sum(1 for f in findings if f.get("recommendation", "").lower() == "remove")
+            console.print(f"  [bold]{sa.split('@')[0]}[/bold] — {len(findings)} unused, {to_remove} removable")
+        return
 
+    # Single service account
     print_banner("GCP", service_account, days, _mode_label(mode), project=project)
 
-    # 1. Fetch IAM role bindings
-    try:
-        from .gcp.iam_analyzer import get_service_account_roles, compute_unused_roles
-        with scan_step("Fetching IAM role bindings") as detail:
-            current_roles = get_service_account_roles(service_account, project)
-            detail(f"[{len(current_roles)} roles]")
-    except PermissionError as e:
-        print_error(str(e))
-        sys.exit(1)
-    except Exception as e:
-        print_error(f"Unexpected error fetching IAM bindings\n  {e}")
-        sys.exit(1)
+    from .gcp.iam_analyzer import get_service_account_roles, compute_unused_roles
+    with scan_step("Fetching IAM role bindings") as detail:
+        current_roles = get_service_account_roles(service_account, project)
+        detail(f"[{len(current_roles)} roles]")
 
-    # 2. Fetch Cloud Audit Logs
-    try:
-        from .gcp.audit_logs import fetch_used_methods
-        with scan_step("Reading Cloud Audit Logs") as detail:
-            used_methods = fetch_used_methods(service_account, project, days)
-            detail(f"[{len(used_methods):,} unique methods]")
-    except PermissionError as e:
-        print_error(str(e))
-        sys.exit(1)
-    except Exception as e:
-        print_error(f"Unexpected error fetching Cloud Audit Logs\n  {e}")
-        sys.exit(1)
+    from .gcp.audit_logs import fetch_used_methods
+    with scan_step("Reading Cloud Audit Logs") as detail:
+        used_methods = fetch_used_methods(service_account, project, days)
+        detail(f"[{len(used_methods):,} unique methods]")
 
     unused_roles = compute_unused_roles(current_roles, used_methods)
     active_roles = [r for r in current_roles if r not in set(unused_roles)]
@@ -380,36 +547,22 @@ def scan_gcp(service_account, project, days, dry_run, output_path, open_github_p
         print_success("No unused roles found — this service account looks well-scoped.")
         sys.exit(0)
 
-    # 3. Claude analysis
-    try:
-        api_key = get_anthropic_api_key(cfg)
-        ai = anthropic.Anthropic(api_key=api_key)
-        from .agent.analyst import analyze_gcp_permissions
-        with scan_step("Claude reasoning about safe removals") as detail:
-            findings = analyze_gcp_permissions(
-                ai, service_account, current_roles, list(used_methods), unused_roles, days
-            )
-            detail("Analysis complete")
-    except ValueError as e:
-        print_error(str(e))
-        sys.exit(1)
-    except Exception as e:
-        print_error(f"Claude analysis failed\n  {e}")
-        sys.exit(1)
+    from .agent.analyst import analyze_gcp_permissions
+    with scan_step("Claude reasoning about safe removals") as detail:
+        findings = analyze_gcp_permissions(
+            ai, service_account, current_roles, list(used_methods), unused_roles, days
+        )
+        detail("Analysis complete")
 
     console.print()
-
-    # 4. Display findings
     print_findings_table(findings, active_roles, item_label="Role")
 
-    # 5. Generate bindings
     from .gcp.policy_generator import generate_minimal_bindings
     current_bindings_json = json.dumps(
         {"serviceAccount": service_account, "currentRoles": current_roles}, indent=2
     )
     new_bindings_json = generate_minimal_bindings(service_account, current_roles, findings)
 
-    # 6. Output
     if mode.is_dry_run:
         print_policy_terminal(current_bindings_json, new_bindings_json)
         print_summary_panel(
@@ -428,7 +581,6 @@ def scan_gcp(service_account, project, days, dry_run, output_path, open_github_p
 
     if mode.github:
         sa_short = service_account.split("@")[0]
-        title = f"fix(iam): tighten permissions for {sa_short} [gcp]"
         try:
             from .shared.pr import open_pr
             pr_url, is_new = open_pr(
@@ -443,7 +595,7 @@ def scan_gcp(service_account, project, days, dry_run, output_path, open_github_p
                 days=days,
                 branch_name=f"iam-zero/gcp-{sa_short}",
             )
-            print_pr_opened(pr_url, title, is_new=is_new)
+            print_pr_opened(pr_url, f"fix(iam): tighten permissions for {sa_short} [gcp]", is_new=is_new)
         except RuntimeError as e:
             print_error(str(e))
             sys.exit(1)

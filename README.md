@@ -62,7 +62,9 @@ iam-zero scan gcp \
 | Command | What happens |
 | ------- | ------------ |
 | `iam-zero scan aws --role <arn>` | **Dry run** — findings printed to terminal, nothing written |
-| `iam-zero scan gcp --service-account <sa> --project <p>` | Same for GCP |
+| `iam-zero scan aws --all-roles` | Scan every IAM role in the account |
+| `iam-zero scan gcp --service-account <sa> --project <p>` | Single GCP service account (dry run) |
+| `iam-zero scan gcp --all-service-accounts --project <p>` | Scan every SA in the project |
 | `iam-zero scan aws --role <arn> --output policy.json` | Writes recommended policy to a file |
 | `iam-zero scan aws --role <arn> --github` | Opens a GitHub PR with full before/after diff |
 | `iam-zero scan aws --role <arn> --output policy.json --github` | Both file + PR |
@@ -175,7 +177,7 @@ pytest      # 57 tests, all pass
 - [x] AWS IAM role scanning
 - [x] Claude-powered safe-removal analysis
 - [x] GitHub PR output
-- [ ] `--all-service-accounts` / `--all-roles` bulk scanning
+- [x] `--all-roles` / `--all-service-accounts` bulk scanning
 - [ ] Homebrew install
 - [ ] CI exit code for policy drift detection
 

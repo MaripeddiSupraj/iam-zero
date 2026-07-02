@@ -63,6 +63,25 @@ def get_role_policies(
     return sorted(actions), raw_docs
 
 
+def list_roles(profile: str | None = None) -> list[str]:
+    """Returns all IAM role ARNs in the account. Paginates automatically."""
+    session = boto3.Session(profile_name=profile)
+    iam = session.client("iam")
+    roles: list[str] = []
+    marker: str | None = None
+    while True:
+        kwargs = {"Marker": marker} if marker else {}
+        resp = iam.list_roles(**kwargs)
+        for role in resp.get("Roles", []):
+            if role.get("Path", "/") == "/aws-service-role/":
+                continue
+            roles.append(role["Arn"])
+        marker = resp.get("Marker")
+        if not resp.get("IsTruncated"):
+            break
+    return sorted(roles)
+
+
 def compute_unused(
     current_actions: list[str],
     used_actions: set[str],

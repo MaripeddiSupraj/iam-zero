@@ -1,7 +1,17 @@
 import re
 
-from google.cloud import resourcemanager_v3
+from google.cloud import resourcemanager_v3, iam_admin_v1
 from google.api_core.exceptions import PermissionDenied, GoogleAPICallError
+
+
+def list_service_accounts(project: str) -> list[str]:
+    """Returns all service account emails in the project. Paginates automatically."""
+    client = iam_admin_v1.IAMClient()
+    request = iam_admin_v1.ListServiceAccountsRequest(name=f"projects/{project}")
+    accounts: list[str] = []
+    for sa in client.list_service_accounts(request=request):
+        accounts.append(sa.email)
+    return sorted(accounts)
 
 
 def get_service_account_roles(
