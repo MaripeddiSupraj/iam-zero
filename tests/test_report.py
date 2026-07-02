@@ -1,4 +1,3 @@
-import pytest
 from iam_zero.shared.report import _blast_radius, _next_steps
 
 
@@ -52,7 +51,6 @@ class TestNextSteps:
     def test_dry_run_shows_both_steps(self):
         steps = _next_steps("gcp", "sa@p.iam.gserviceaccount.com", "my-proj",
                             is_dry_run=True, has_file=False, has_github=False)
-        labels = [s[0].strip() for s in steps]
         cmds = [s[1] for s in steps]
         assert any("output" in c for c in cmds), "should suggest --output"
         assert any("github" in c for c in cmds), "should suggest --github"

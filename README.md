@@ -74,6 +74,8 @@ iam-zero scan aws --role arn:aws:iam::123456789012:role/my-role
 | `--output policy.json` | Writes recommended policy to a file |
 | `--github` | Opens a GitHub PR with full before/after diff |
 | `--output policy.json --github` | Both |
+| `--region us-east-2` | CloudTrail region for the lookup (AWS only) |
+| `--no-access-advisor` | Skip IAM Access Advisor corroboration (AWS only, not recommended) |
 
 `--dry-run` always takes priority. Safe by default.
 
@@ -124,6 +126,8 @@ iam-zero scan aws --role arn:aws:iam::123456789012:role/my-role
 ### AWS (your caller identity)
 
 - `cloudtrail:LookupEvents`
+- `iam:GenerateServiceLastAccessedDetails`
+- `iam:GetServiceLastAccessedDetails`
 - `iam:GetRole`
 - `iam:ListAttachedRolePolicies`
 - `iam:GetPolicy`
@@ -133,12 +137,30 @@ iam-zero scan aws --role arn:aws:iam::123456789012:role/my-role
 
 ---
 
+## Known limitations (read before trusting output)
+
+- **CloudTrail `LookupEvents` records management events only.** Data-plane calls
+  (`s3:GetObject`, `dynamodb:GetItem`, `sqs:SendMessage`, ...) never appear there.
+  iam-zero corroborates with **IAM Access Advisor**: any action whose service shows
+  recent authentication is automatically protected from a "remove" recommendation.
+  Access Advisor is service-granular, not action-granular — treat every removal as
+  a hypothesis and test in staging first.
+- **CloudTrail lookup is per-region.** Pass `--region` for each region the role is
+  active in, or activity outside your default region will be missed.
+- **GCP Data Access audit logs are disabled by default.** If they're off, read-heavy
+  usage (GCS reads, BigQuery queries) is invisible; iam-zero's prompt biases toward
+  "investigate" for such roles, but enable Data Access logs for real signal.
+- **CloudTrail `LookupEvents` retains 90 days.** `--days` beyond 90 won't return more.
+
 ## Safety
 
 - **Read-only** — never modifies IAM policies directly
 - **Dry run by default** — zero side effects unless you pass `--output` or `--github`
 - **Human in the loop** — all changes go through a PR before anything is applied
 - **Idempotent** — won't open a duplicate PR if one already exists for this identity
+- **PRs carry the artifact** — the recommended policy is committed as
+  `iam-zero/<cloud>/<identity>.recommended-policy.json` on the PR branch, so merging
+  puts the policy in your repo for your IaC pipeline to pick up
 
 ---
 

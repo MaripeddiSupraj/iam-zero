@@ -1,7 +1,4 @@
-import boto3
-import pytest
-from moto import mock_aws
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock
 
 from iam_zero.aws.cloudtrail import fetch_used_actions, _event_source_to_prefix, _role_name
 

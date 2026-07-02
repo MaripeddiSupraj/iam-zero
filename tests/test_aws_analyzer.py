@@ -1,4 +1,3 @@
-import pytest
 from iam_zero.aws.iam_analyzer import compute_unused
 
 

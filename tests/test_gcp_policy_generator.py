@@ -1,5 +1,4 @@
 import json
-import pytest
 from iam_zero.gcp.policy_generator import generate_minimal_bindings
 
 

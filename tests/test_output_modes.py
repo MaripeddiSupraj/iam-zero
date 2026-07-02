@@ -1,8 +1,7 @@
-import json
 import os
 import pytest
 
-from iam_zero.shared.output import resolve_output_mode, write_policy_file, OutputMode
+from iam_zero.shared.output import resolve_output_mode, write_policy_file
 
 
 # ---------------------------------------------------------------------------

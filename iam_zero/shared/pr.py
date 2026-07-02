@@ -1,4 +1,3 @@
-import json
 from github import Github, GithubException
 
 
@@ -9,6 +8,40 @@ def _find_existing_pr(repo, title_prefix: str) -> str | None:
     return None
 
 
+def _ensure_branch(repo, branch_name: str, base_branch: str) -> None:
+    """Create branch_name off base_branch if it doesn't already exist."""
+    base = repo.get_branch(base_branch)
+    ref = f"refs/heads/{branch_name}"
+    try:
+        repo.create_git_ref(ref=ref, sha=base.commit.sha)
+    except GithubException as e:
+        if e.status == 422:  # Reference already exists
+            return
+        raise
+
+
+def _commit_policy_file(
+    repo,
+    branch_name: str,
+    cloud: str,
+    identity_short: str,
+    new_policy: str,
+) -> str:
+    """Create or update the recommended policy file on the branch. Returns the path."""
+    path = f"iam-zero/{cloud}/{identity_short}.recommended-policy.json"
+    message = f"chore(iam-zero): recommended least-privilege policy for {identity_short} [{cloud}]"
+    content = new_policy if new_policy.endswith("\n") else new_policy + "\n"
+    try:
+        existing = repo.get_contents(path, ref=branch_name)
+        repo.update_file(path, message, content, existing.sha, branch=branch_name)
+    except GithubException as e:
+        if e.status == 404:
+            repo.create_file(path, message, content, branch=branch_name)
+        else:
+            raise
+    return path
+
+
 def _build_pr_body(
     cloud: str,
     identity: str,
@@ -16,12 +49,13 @@ def _build_pr_body(
     current_policy: str,
     new_policy: str,
     days: int,
+    policy_path: str,
 ) -> str:
     total = len(findings)
     to_remove = [f for f in findings if f.get("recommendation", "").lower() == "remove"]
 
     rows = "\n".join(
-        f"| `{f['permission']}` | {f.get('last_used', 'never')} "
+        f"| `{f['permission']}` | {f.get('last_used') or 'not observed'} "
         f"| {f.get('recommendation', 'investigate')} | {f.get('risk', 'unknown')} |"
         for f in findings
     )
@@ -32,6 +66,7 @@ def _build_pr_body(
 **Analysis window:** last {days} days
 **Unused permissions found:** {total}
 **Recommended for removal:** {len(to_remove)}
+**Recommended policy file:** `{policy_path}` (committed on this branch)
 
 ### Permission Analysis
 
@@ -59,6 +94,11 @@ def _build_pr_body(
 
 </details>
 
+### ⚠️ Before merging
+CloudTrail `LookupEvents` covers **management events only** — data-plane calls
+(e.g. `s3:GetObject`, `dynamodb:GetItem`) are corroborated via IAM Access Advisor
+at service granularity, not per-action. Treat every removal as a hypothesis.
+
 ### How to test
 1. Apply the new policy in a staging environment
 2. Run your normal workload for 24–48 hours
@@ -81,15 +121,16 @@ def open_pr(
     new_policy: str,
     days: int,
     branch_name: str,
-    base_branch: str = "main",
+    base_branch: str | None = None,
 ) -> tuple[str, bool]:
     """
+    Creates the branch, commits the recommended policy file, and opens the PR.
+
     Returns (pr_url, is_new).
     is_new=True  → PR was just created.
     is_new=False → an open PR for this identity already existed.
     """
     title = f"fix(iam): tighten permissions for {identity_short} [{cloud}]"
-    body = _build_pr_body(cloud, identity, findings, current_policy, new_policy, days)
 
     gh = Github(github_token)
     try:
@@ -104,13 +145,23 @@ def open_pr(
     if existing:
         return existing, False
 
+    if base_branch is None:
+        base_branch = repo.default_branch
+
     try:
-        pr = repo.create_pull(
-            title=title,
-            body=body,
-            head=branch_name,
-            base=base_branch,
-        )
+        _ensure_branch(repo, branch_name, base_branch)
+        policy_path = _commit_policy_file(repo, branch_name, cloud, identity_short, new_policy)
+    except GithubException as e:
+        raise RuntimeError(
+            f"Failed to prepare branch '{branch_name}': {e.data.get('message', str(e))}"
+        ) from e
+
+    body = _build_pr_body(
+        cloud, identity, findings, current_policy, new_policy, days, policy_path
+    )
+
+    try:
+        pr = repo.create_pull(title=title, body=body, head=branch_name, base=base_branch)
         return pr.html_url, True
     except GithubException as e:
         raise RuntimeError(

@@ -133,13 +133,17 @@ def scan():
 @click.option("--role", "role_arn", required=True, help="IAM role ARN to scan")
 @click.option("--days", default=90, show_default=True, help="Look-back window in days")
 @click.option("--profile", default=None, help="AWS profile name")
+@click.option("--region", default=None,
+              help="AWS region for CloudTrail lookup (LookupEvents is per-region)")
+@click.option("--no-access-advisor", is_flag=True, default=False,
+              help="Skip the IAM Access Advisor corroboration step")
 @click.option("--dry-run", is_flag=True, default=False,
               help="Print findings to terminal only (default if no output flag given)")
 @click.option("--output", "output_path", default=None, metavar="PATH",
               help="Write recommended policy JSON to this file")
 @click.option("--github", "open_github_pr", is_flag=True, default=False,
               help="Open a GitHub PR (requires token + repo in config)")
-def scan_aws(role_arn, days, profile, dry_run, output_path, open_github_pr):
+def scan_aws(role_arn, days, profile, region, no_access_advisor, dry_run, output_path, open_github_pr):
     """Scan an AWS IAM role and output a least-privilege policy.
 
     Default (no flags): dry-run — prints findings to terminal, no side effects.
@@ -170,7 +174,7 @@ def scan_aws(role_arn, days, profile, dry_run, output_path, open_github_pr):
     try:
         from .aws.cloudtrail import fetch_used_actions
         with scan_step("Reading CloudTrail events") as detail:
-            used_actions = fetch_used_actions(role_arn, days, profile=profile)
+            used_actions = fetch_used_actions(role_arn, days, profile=profile, region=region)
             detail(f"[{len(used_actions):,} unique actions]")
     except PermissionError as e:
         print_error(str(e))
@@ -199,6 +203,27 @@ def scan_aws(role_arn, days, profile, dry_run, output_path, open_github_pr):
         print_success("No unused permissions found — this role looks well-scoped already.")
         sys.exit(0)
 
+    # 2b. Access Advisor corroboration — CloudTrail LookupEvents misses all
+    # data-plane events; Access Advisor tells us which services actually
+    # authenticated, so we never recommend removing an action whose service
+    # is demonstrably active.
+    protected_actions: dict[str, str] = {}
+    if not no_access_advisor:
+        try:
+            from .aws.access_advisor import fetch_service_last_accessed, protect_active_services
+            with scan_step("Corroborating with IAM Access Advisor") as detail:
+                service_last_accessed = fetch_service_last_accessed(role_arn, profile=profile)
+                unused_actions, protected_actions = protect_active_services(
+                    unused_actions, service_last_accessed
+                )
+                detail(f"[{len(protected_actions)} action(s) protected by service activity]")
+            unused_actions = sorted(set(unused_actions) | set(protected_actions))
+        except PermissionError as e:
+            console.print("  [yellow]⚠  Access Advisor unavailable — continuing without it[/yellow]")
+            console.print(f"  [dim]{e}[/dim]")
+        except Exception as e:
+            console.print(f"  [yellow]⚠  Access Advisor failed ({e}) — continuing without it[/yellow]")
+
     # 3. Claude analysis
     try:
         api_key = get_anthropic_api_key(cfg)
@@ -206,7 +231,8 @@ def scan_aws(role_arn, days, profile, dry_run, output_path, open_github_pr):
         from .agent.analyst import analyze_aws_permissions
         with scan_step("Claude reasoning about safe removals") as detail:
             findings = analyze_aws_permissions(
-                ai, role_arn, current_actions, list(used_actions), unused_actions, days
+                ai, role_arn, current_actions, list(used_actions), unused_actions, days,
+                protected_actions=protected_actions,
             )
             detail("Analysis complete")
     except ValueError as e:

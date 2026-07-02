@@ -1,4 +1,3 @@
-import re
 from datetime import datetime, timedelta, timezone
 
 import boto3
