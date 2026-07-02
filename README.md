@@ -39,10 +39,17 @@ pip install iam-zero
 # 2. Configure (just your Anthropic key)
 iam-zero configure
 
-# 3. Scan a role — dry run by default, zero side effects
+# 3. Enable GCP APIs (one-time, only if scanning GCP)
+gcloud services enable \
+  cloudresourcemanager.googleapis.com \
+  logging.googleapis.com \
+  iam.googleapis.com \
+  --project YOUR-PROJECT
+
+# 4. Scan an AWS role — dry run by default, zero side effects
 iam-zero scan aws --role arn:aws:iam::123456789012:role/my-role
 
-# Or a GCP service account
+# Or scan a GCP service account
 iam-zero scan gcp \
   --service-account sa@my-project.iam.gserviceaccount.com \
   --project my-project
@@ -55,12 +62,12 @@ iam-zero scan gcp \
 | Command | What happens |
 | ------- | ------------ |
 | `iam-zero scan aws --role <arn>` | **Dry run** — findings printed to terminal, nothing written |
-| `iam-zero scan aws --role <arn> --dry-run` | Same, explicit |
+| `iam-zero scan gcp --service-account <sa> --project <p>` | Same for GCP |
 | `iam-zero scan aws --role <arn> --output policy.json` | Writes recommended policy to a file |
 | `iam-zero scan aws --role <arn> --github` | Opens a GitHub PR with full before/after diff |
-| `iam-zero scan aws --role <arn> --output policy.json --github` | Both |
+| `iam-zero scan aws --role <arn> --output policy.json --github` | Both file + PR |
 | `iam-zero scan aws --role <arn> --region us-east-2` | Specify CloudTrail region (AWS only) |
-| `iam-zero scan aws --role <arn> --no-access-advisor` | Skip Access Advisor corroboration (AWS only) |
+| `iam-zero scan aws --role <arn> --no-access-advisor` | Skip Access Advisor corroboration (AWS only, not recommended) |
 
 `--dry-run` always takes priority. **Safe by default.**
 
