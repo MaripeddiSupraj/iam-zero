@@ -2,8 +2,8 @@
 
 > Detect overpermissive IAM roles on AWS and GCP. Auto-generate least-privilege policies. Open PRs — not tickets.
 
-[![PyPI version](https://img.shields.io/pypi/v/iam-zero)](https://pypi.org/project/iam-zero/)
-[![Python versions](https://img.shields.io/pypi/pyversions/iam-zero)](https://pypi.org/project/iam-zero/)
+[![PyPI version](https://img.shields.io/pypi/v/zero-iam)](https://pypi.org/project/zero-iam/)
+[![Python versions](https://img.shields.io/pypi/pyversions/zero-iam)](https://pypi.org/project/zero-iam/)
 [![License](https://img.shields.io/github/license/MaripeddiSupraj/iam-zero)](LICENSE)
 
 Most IAM roles are massively over-permissioned. Teams either handcraft policies (slow, error-prone) or attach `AdministratorAccess` and pray. Neither scales.
@@ -34,7 +34,7 @@ CloudTrail / Cloud Audit Logs
 
 ```bash
 # 1. Install
-pip install iam-zero
+pip install zero-iam
 
 # 2. Configure (just your Anthropic key)
 iam-zero configure

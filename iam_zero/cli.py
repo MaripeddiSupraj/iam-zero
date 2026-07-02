@@ -36,7 +36,7 @@ def _mode_label(mode) -> str:
 # ---------------------------------------------------------------------------
 
 @click.group()
-@click.version_option(package_name="iam-zero")
+@click.version_option(package_name="zero-iam")
 def cli():
     """iam-zero — detect overpermissive IAM roles and auto-open least-privilege PRs."""
 

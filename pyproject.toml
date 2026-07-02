@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "iam-zero"
+name = "zero-iam"
 version = "0.2.0"
 description = "Detect overpermissive IAM roles on AWS + GCP and auto-open PRs with least-privilege policies"
 readme = "README.md"
