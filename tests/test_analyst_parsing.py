@@ -1,5 +1,10 @@
 import pytest
-from iam_zero.agent.analyst import _complete_findings, _extract_json_array, _validate_findings
+from iam_zero.agent.analyst import (
+    _complete_findings,
+    _extract_json_array,
+    _model_name,
+    _validate_findings,
+)
 
 
 def test_extracts_plain_array():
@@ -122,3 +127,9 @@ def test_advisory_only_downgrades_remove():
 
     assert result[0]["recommendation"] == "investigate"
     assert result[0]["risk"] == "high"
+
+
+
+def test_model_name_can_be_overridden(monkeypatch):
+    monkeypatch.setenv("IAM_ZERO_MODEL", "test-model")
+    assert _model_name() == "test-model"
