@@ -187,7 +187,7 @@ def _scan_aws_role(role_arn, days, profile, region, no_access_advisor, cfg, mode
     """Run the full scan pipeline for a single AWS role. Returns (role_arn, findings, active_actions, raw_docs, current_actions, used_actions) or None on unrecoverable error."""
     from .aws.cloudtrail import fetch_used_actions
     from .aws.iam_analyzer import get_role_policies, compute_unused
-    from .aws.access_advisor import fetch_service_last_accessed, protect_active_services
+    from .aws.access_advisor import fetch_access_evidence, protect_active_services
     from .aws.policy_generator import generate_minimal_policy
     from .agent.analyst import analyze_aws_permissions
 
@@ -199,17 +199,23 @@ def _scan_aws_role(role_arn, days, profile, region, no_access_advisor, cfg, mode
         current_actions, raw_docs = get_role_policies(role_arn, profile=profile)
         detail(f"[{len(current_actions)} actions in policy]")
 
+    protected_actions: dict[str, str] = {}
+    service_last_accessed: dict[str, str | None] = {}
+    if not no_access_advisor:
+        with scan_step(f"Access Advisor — {role_arn.split('/')[-1]}") as detail:
+            service_last_accessed, action_last_accessed = fetch_access_evidence(
+                role_arn, profile=profile
+            )
+            used_actions |= set(action_last_accessed)
+            detail(f"[{len(action_last_accessed)} tracked actions observed]")
+
     unused_actions = compute_unused(current_actions, used_actions)
     active_actions = [a for a in current_actions if a in used_actions]
 
-    protected_actions: dict[str, str] = {}
-    if not no_access_advisor and unused_actions:
-        with scan_step(f"Access Advisor — {role_arn.split('/')[-1]}") as detail:
-            service_last_accessed = fetch_service_last_accessed(role_arn, profile=profile)
-            unused_actions, protected_actions = protect_active_services(
-                unused_actions, service_last_accessed
-            )
-            detail(f"[{len(protected_actions)} protected]")
+    if service_last_accessed and unused_actions:
+        unused_actions, protected_actions = protect_active_services(
+            unused_actions, service_last_accessed
+        )
         unused_actions = sorted(set(unused_actions) | set(protected_actions))
 
     if not unused_actions:
@@ -349,15 +355,14 @@ def scan_aws(role_arn, all_roles, days, profile, region, no_access_advisor, dry_
 
     protected_actions: dict[str, str] = {}
     if not no_access_advisor:
-        from .aws.access_advisor import fetch_service_last_accessed, protect_active_services
+        from .aws.access_advisor import fetch_access_evidence, protect_active_services
         try:
             with scan_step("Corroborating with IAM Access Advisor") as detail:
-                service_last_accessed = fetch_service_last_accessed(role_arn, profile=profile)
-                unused_actions, protected_actions = protect_active_services(
-                    unused_actions, service_last_accessed
+                service_last_accessed, action_last_accessed = fetch_access_evidence(
+                    role_arn, profile=profile
                 )
-                detail(f"[{len(protected_actions)} action(s) protected by service activity]")
-            unused_actions = sorted(set(unused_actions) | set(protected_actions))
+                used_actions |= set(action_last_accessed)
+                detail(f"[{len(action_last_accessed)} tracked action(s) observed]")
         except (PermissionError, RuntimeError) as e:
             print_error(
                 "Access Advisor is required for safe AWS removal recommendations.\n"
@@ -366,6 +371,17 @@ def scan_aws(role_arn, all_roles, days, profile, region, no_access_advisor, dry_
                 "to accept reduced evidence."
             )
             sys.exit(1)
+
+        unused_actions = compute_unused(current_actions, used_actions)
+        active_actions = [a for a in current_actions if a in used_actions]
+        unused_actions, protected_actions = protect_active_services(
+            unused_actions, service_last_accessed
+        )
+        unused_actions = sorted(set(unused_actions) | set(protected_actions))
+
+        if not unused_actions:
+            print_success("No unused permissions found after Access Advisor evidence.")
+            sys.exit(0)
 
     from .agent.analyst import analyze_aws_permissions
     with scan_step("Claude reasoning about safe removals") as detail:
