@@ -1,5 +1,7 @@
 import json
 import sys
+from dataclasses import replace
+from pathlib import Path
 
 import click
 import anthropic
@@ -148,6 +150,21 @@ def _validate_github(cfg, mode) -> tuple[str, str]:
     return token, repo
 
 
+def _bulk_output_path(path: str | None, cloud: str, identity: str) -> str | None:
+    """Return a unique output path for one identity in a bulk scan."""
+    if not path:
+        return None
+
+    safe_identity = "".join(
+        c if c.isalnum() or c in ("-", "_", ".") else "-" for c in identity
+    ).strip("-") or "identity"
+    base = Path(path)
+
+    if base.suffix.lower() == ".json":
+        return str(base.with_name(f"{base.stem}-{cloud}-{safe_identity}{base.suffix}"))
+    return str(base / f"{cloud}-{safe_identity}.json")
+
+
 def _print_bulk_header(cloud: str, identities: list[str], days: int, mode_label: str, project=None):
     console.print()
     console.print(f"[bold cyan]╭─{'─'*56}╮[/bold cyan]")
@@ -187,16 +204,13 @@ def _scan_aws_role(role_arn, days, profile, region, no_access_advisor, cfg, mode
 
     protected_actions: dict[str, str] = {}
     if not no_access_advisor and unused_actions:
-        try:
-            with scan_step(f"Access Advisor — {role_arn.split('/')[-1]}") as detail:
-                service_last_accessed = fetch_service_last_accessed(role_arn, profile=profile)
-                unused_actions, protected_actions = protect_active_services(
-                    unused_actions, service_last_accessed
-                )
-                detail(f"[{len(protected_actions)} protected]")
-            unused_actions = sorted(set(unused_actions) | set(protected_actions))
-        except (PermissionError, Exception):
-            pass
+        with scan_step(f"Access Advisor — {role_arn.split('/')[-1]}") as detail:
+            service_last_accessed = fetch_service_last_accessed(role_arn, profile=profile)
+            unused_actions, protected_actions = protect_active_services(
+                unused_actions, service_last_accessed
+            )
+            detail(f"[{len(protected_actions)} protected]")
+        unused_actions = sorted(set(unused_actions) | set(protected_actions))
 
     if not unused_actions:
         console.print(f"  [dim]✓ {role_arn.split('/')[-1]} — well-scoped, nothing to tighten[/dim]")
@@ -260,7 +274,7 @@ def _scan_aws_role(role_arn, days, profile, region, no_access_advisor, cfg, mode
 @click.option("--dry-run", is_flag=True, default=False,
               help="Print findings to terminal only (default if no output flag given)")
 @click.option("--output", "output_path", default=None, metavar="PATH",
-              help="Write recommended policy JSON to this file")
+              help="Write recommended policy JSON (bulk scans create one file per identity)")
 @click.option("--github", "open_github_pr", is_flag=True, default=False,
               help="Open a GitHub PR (requires token + repo in config)")
 def scan_aws(role_arn, all_roles, days, profile, region, no_access_advisor, dry_run, output_path, open_github_pr):
@@ -291,7 +305,15 @@ def scan_aws(role_arn, all_roles, days, profile, region, no_access_advisor, dry_
         _print_bulk_header("AWS", identities, days, _mode_label(mode))
         results = []
         for arn in identities:
-            r = _scan_aws_role(arn, days, profile, region, no_access_advisor, cfg, mode, ai, github_token, target_repo)
+            role_short = arn.split("/")[-1]
+            role_mode = replace(
+                mode,
+                file_path=_bulk_output_path(mode.file_path, "aws", role_short),
+            )
+            r = _scan_aws_role(
+                arn, days, profile, region, no_access_advisor, cfg,
+                role_mode, ai, github_token, target_repo,
+            )
             if r:
                 results.append(r)
         if not results:
@@ -327,8 +349,8 @@ def scan_aws(role_arn, all_roles, days, profile, region, no_access_advisor, dry_
 
     protected_actions: dict[str, str] = {}
     if not no_access_advisor:
+        from .aws.access_advisor import fetch_service_last_accessed, protect_active_services
         try:
-            from .aws.access_advisor import fetch_service_last_accessed, protect_active_services
             with scan_step("Corroborating with IAM Access Advisor") as detail:
                 service_last_accessed = fetch_service_last_accessed(role_arn, profile=profile)
                 unused_actions, protected_actions = protect_active_services(
@@ -336,11 +358,14 @@ def scan_aws(role_arn, all_roles, days, profile, region, no_access_advisor, dry_
                 )
                 detail(f"[{len(protected_actions)} action(s) protected by service activity]")
             unused_actions = sorted(set(unused_actions) | set(protected_actions))
-        except PermissionError as e:
-            console.print("  [yellow]⚠  Access Advisor unavailable — continuing without it[/yellow]")
-            console.print(f"  [dim]{e}[/dim]")
-        except Exception as e:
-            console.print(f"  [yellow]⚠  Access Advisor failed ({e}) — continuing without it[/yellow]")
+        except (PermissionError, RuntimeError) as e:
+            print_error(
+                "Access Advisor is required for safe AWS removal recommendations.\n"
+                f"  {e}\n"
+                "  Fix the Access Advisor error, or explicitly pass --no-access-advisor "
+                "to accept reduced evidence."
+            )
+            sys.exit(1)
 
     from .agent.analyst import analyze_aws_permissions
     with scan_step("Claude reasoning about safe removals") as detail:
@@ -515,7 +540,14 @@ def scan_gcp(service_account, all_service_accounts, project, days, dry_run, outp
         _print_bulk_header("GCP", identities, days, _mode_label(mode), project=project)
         results = []
         for sa in identities:
-            r = _scan_gcp_sa(sa, project, days, cfg, mode, ai, github_token, target_repo)
+            sa_short = sa.split("@")[0]
+            sa_mode = replace(
+                mode,
+                file_path=_bulk_output_path(mode.file_path, "gcp", sa_short),
+            )
+            r = _scan_gcp_sa(
+                sa, project, days, cfg, sa_mode, ai, github_token, target_repo
+            )
             if r:
                 results.append(r)
         if not results:
