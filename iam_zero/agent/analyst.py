@@ -26,7 +26,7 @@ def _validate_findings(items: list[dict]) -> list[dict]:
         risk = str(item.get("risk", "medium")).lower()
         findings.append(
             {
-                "permission": item["permission"],
+                "permission": str(item["permission"]),
                 "recommendation": rec if rec in _VALID_RECOMMENDATIONS else "investigate",
                 "risk": risk if risk in _VALID_RISKS else "medium",
                 "reason": str(item.get("reason", "")).strip(),
@@ -34,6 +34,55 @@ def _validate_findings(items: list[dict]) -> list[dict]:
             }
         )
     return findings
+
+
+def _complete_findings(
+    findings: list[dict],
+    expected_permissions: list[str],
+    protected_actions: dict[str, str] | None = None,
+) -> list[dict]:
+    """Return exactly one safe finding for every requested candidate.
+
+    Model output is advisory. Hallucinated permissions are discarded and any
+    omitted/invalid candidate becomes "investigate" so an LLM truncation or
+    formatting error can never silently remove access.
+    """
+    expected = list(dict.fromkeys(expected_permissions))
+    expected_set = set(expected)
+    protected_actions = protected_actions or {}
+
+    by_permission: dict[str, dict] = {}
+    for finding in findings:
+        permission = finding.get("permission")
+        if permission in expected_set and permission not in by_permission:
+            by_permission[permission] = dict(finding)
+
+    completed: list[dict] = []
+    for permission in expected:
+        finding = by_permission.get(
+            permission,
+            {
+                "permission": permission,
+                "recommendation": "investigate",
+                "risk": "medium",
+                "reason": "No valid model finding returned; kept for safety.",
+                "last_used": None,
+            },
+        )
+
+        if permission in protected_actions:
+            if finding.get("recommendation") == "remove":
+                finding["recommendation"] = "investigate"
+                finding["reason"] = (
+                    "Service recently authenticated per Access Advisor; "
+                    "action-level usage may be absent from CloudTrail. "
+                    + str(finding.get("reason", ""))
+                ).strip()
+            finding["last_used"] = protected_actions[permission]
+
+        completed.append(finding)
+
+    return completed
 
 
 def _run(client: anthropic.Anthropic, prompt: str) -> list[dict]:
@@ -94,19 +143,7 @@ Return a JSON array only — no prose, no markdown. Example:
 ]"""
 
     findings = _run(client, prompt)
-
-    # Hard guarantee: protected actions can never come back as "remove",
-    # regardless of what the model said.
-    for f in findings:
-        if f["permission"] in protected_actions:
-            if f["recommendation"] == "remove":
-                f["recommendation"] = "investigate"
-                f["reason"] = (
-                    "Service recently authenticated per Access Advisor (likely data-plane "
-                    "usage invisible to CloudTrail). " + f["reason"]
-                ).strip()
-            f["last_used"] = protected_actions[f["permission"]]
-    return findings
+    return _complete_findings(findings, unused_permissions, protected_actions)
 
 
 def analyze_gcp_permissions(
@@ -139,4 +176,5 @@ Return a JSON array only — no prose, no markdown. Example:
   {{"permission": "roles/iam.serviceAccountTokenCreator", "recommendation": "investigate", "risk": "high", "reason": "Token creation may be used by downstream services not visible in these logs."}}
 ]"""
 
-    return _run(client, prompt)
+    findings = _run(client, prompt)
+    return _complete_findings(findings, unused_roles)
