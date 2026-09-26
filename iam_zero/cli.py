@@ -4,7 +4,12 @@ import sys
 import click
 import anthropic
 
-from .shared.config import load_config, save_config, get_github_token, get_anthropic_api_key
+from .shared.config import (
+    get_github_token,
+    get_optional_anthropic_api_key,
+    load_config,
+    save_config,
+)
 from .shared.output import bulk_output_mode, resolve_output_mode, write_policy_file
 from .shared.report import (
     console,
@@ -19,6 +24,18 @@ from .shared.report import (
     print_error,
 )
 
+
+def _build_ai_client(cfg, no_ai: bool):
+    if no_ai:
+        return None
+    key = get_optional_anthropic_api_key(cfg)
+    if not key:
+        console.print(
+            "  [yellow]⚠  No Anthropic key configured — using deterministic "
+            "review-only analysis.[/yellow]"
+        )
+        return None
+    return anthropic.Anthropic(api_key=key)
 
 def _mode_label(mode) -> str:
     if mode.is_dry_run:
@@ -215,13 +232,25 @@ def _scan_aws_role(role_arn, days, profile, region, no_access_advisor, cfg, mode
         console.print(f"  [dim]✓ {role_arn.split('/')[-1]} — well-scoped, nothing to tighten[/dim]")
         return None
 
-    with scan_step(f"Claude — {role_arn.split('/')[-1]}") as detail:
-        findings = analyze_aws_permissions(
-            ai, role_arn, current_actions, list(used_actions), unused_actions, days,
-            protected_actions=protected_actions,
-            advisory_only=no_access_advisor,
+    if ai is None:
+        from .agent.analyst import conservative_findings
+        findings = conservative_findings(
+            unused_actions,
+            protected=protected_actions,
         )
-        detail("done")
+    else:
+        with scan_step(f"AI review — {role_arn.split('/')[-1]}") as detail:
+            findings = analyze_aws_permissions(
+                ai,
+                role_arn,
+                current_actions,
+                list(used_actions),
+                unused_actions,
+                days,
+                protected_actions=protected_actions,
+                advisory_only=no_access_advisor,
+            )
+            detail("done")
 
     current_policy_json = json.dumps(combine_policy_documents(raw_docs), indent=2)
     new_policy_json = generate_minimal_policy(used_actions, findings, raw_docs)
@@ -279,6 +308,12 @@ def _scan_aws_role(role_arn, days, profile, region, no_access_advisor, cfg, mode
     help="Run advisory-only without IAM last-accessed corroboration",
 )
 @click.option(
+    "--no-ai",
+    is_flag=True,
+    default=False,
+    help="Do not send IAM metadata to an external model; review-only findings",
+)
+@click.option(
     "--dry-run",
     is_flag=True,
     default=False,
@@ -288,7 +323,7 @@ def _scan_aws_role(role_arn, days, profile, region, no_access_advisor, cfg, mode
               help="Write recommended policy JSON to this file")
 @click.option("--github", "open_github_pr", is_flag=True, default=False,
               help="Open a GitHub PR (requires token + repo in config)")
-def scan_aws(role_arn, all_roles, days, profile, region, no_access_advisor, dry_run, output_path, open_github_pr):
+def scan_aws(role_arn, all_roles, days, profile, region, no_access_advisor, no_ai, dry_run, output_path, open_github_pr):
     """Scan AWS IAM roles and output least-privilege policies.
 
     Pass --role for a single role, or --all-roles to scan every role in the account.
@@ -305,8 +340,7 @@ def scan_aws(role_arn, all_roles, days, profile, region, no_access_advisor, dry_
     cfg = load_config()
     mode = resolve_output_mode(dry_run, output_path, open_github_pr)
     github_token, target_repo = _validate_github(cfg, mode)
-    api_key = get_anthropic_api_key(cfg)
-    ai = anthropic.Anthropic(api_key=api_key)
+    ai = _build_ai_client(cfg, no_ai)
 
     if all_roles:
         from .aws.iam_analyzer import list_roles
@@ -406,13 +440,25 @@ def scan_aws(role_arn, all_roles, days, profile, region, no_access_advisor, dry_
         sys.exit(0)
 
     from .agent.analyst import analyze_aws_permissions
-    with scan_step("Claude reasoning about safe removals") as detail:
-        findings = analyze_aws_permissions(
-            ai, role_arn, current_actions, list(used_actions), unused_actions, days,
-            protected_actions=protected_actions,
-            advisory_only=no_access_advisor,
+    if ai is None:
+        from .agent.analyst import conservative_findings
+        findings = conservative_findings(
+            unused_actions,
+            protected=protected_actions,
         )
-        detail("Analysis complete")
+    else:
+        with scan_step("AI review of removal candidates") as detail:
+            findings = analyze_aws_permissions(
+                ai,
+                role_arn,
+                current_actions,
+                list(used_actions),
+                unused_actions,
+                days,
+                protected_actions=protected_actions,
+                advisory_only=no_access_advisor,
+            )
+            detail("Analysis complete")
 
     console.print()
     print_findings_table(findings, active_actions, item_label="Permission")
@@ -494,11 +540,20 @@ def _scan_gcp_sa(service_account, project, days, cfg, mode, ai, github_token, ta
         console.print(f"  [dim]✓ {sa_short} — well-scoped, nothing to tighten[/dim]")
         return None
 
-    with scan_step(f"Claude — {sa_short}") as detail:
-        findings = analyze_gcp_permissions(
-            ai, service_account, current_roles, list(used_methods), unused_roles, days
-        )
-        detail("done")
+    if ai is None:
+        from .agent.analyst import conservative_findings
+        findings = conservative_findings(unused_roles)
+    else:
+        with scan_step(f"AI review — {sa_short}") as detail:
+            findings = analyze_gcp_permissions(
+                ai,
+                service_account,
+                current_roles,
+                list(used_methods),
+                unused_roles,
+                days,
+            )
+            detail("done")
 
     current_bindings_json = json.dumps(
         {"serviceAccount": service_account, "currentRoles": current_roles}, indent=2
@@ -543,9 +598,11 @@ def _scan_gcp_sa(service_account, project, days, cfg, mode, ai, github_token, ta
               help="Print findings to terminal only (default if no output flag given)")
 @click.option("--output", "output_path", default=None, metavar="PATH",
               help="Write recommended policy JSON to this file")
+@click.option("--no-ai", is_flag=True, default=False,
+              help="Do not send IAM metadata to an external model; review-only findings")
 @click.option("--github", "open_github_pr", is_flag=True, default=False,
               help="Open a GitHub PR (requires token + repo in config)")
-def scan_gcp(service_account, all_service_accounts, project, days, dry_run, output_path, open_github_pr):
+def scan_gcp(service_account, all_service_accounts, project, days, dry_run, output_path, no_ai, open_github_pr):
     """Scan GCP service accounts and output least-privilege policies.
 
     Pass --service-account for one SA, or --all-service-accounts to scan every SA in the project.
@@ -562,8 +619,7 @@ def scan_gcp(service_account, all_service_accounts, project, days, dry_run, outp
     cfg = load_config()
     mode = resolve_output_mode(dry_run, output_path, open_github_pr)
     github_token, target_repo = _validate_github(cfg, mode)
-    api_key = get_anthropic_api_key(cfg)
-    ai = anthropic.Anthropic(api_key=api_key)
+    ai = _build_ai_client(cfg, no_ai)
 
     if all_service_accounts:
         from .gcp.iam_analyzer import list_service_accounts
@@ -611,11 +667,20 @@ def scan_gcp(service_account, all_service_accounts, project, days, dry_run, outp
         sys.exit(0)
 
     from .agent.analyst import analyze_gcp_permissions
-    with scan_step("Claude reasoning about safe removals") as detail:
-        findings = analyze_gcp_permissions(
-            ai, service_account, current_roles, list(used_methods), unused_roles, days
-        )
-        detail("Analysis complete")
+    if ai is None:
+        from .agent.analyst import conservative_findings
+        findings = conservative_findings(unused_roles)
+    else:
+        with scan_step("AI review of role candidates") as detail:
+            findings = analyze_gcp_permissions(
+                ai,
+                service_account,
+                current_roles,
+                list(used_methods),
+                unused_roles,
+                days,
+            )
+            detail("Analysis complete")
 
     console.print()
     print_findings_table(findings, active_roles, item_label="Role")
