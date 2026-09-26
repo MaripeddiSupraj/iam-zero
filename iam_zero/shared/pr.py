@@ -1,10 +1,23 @@
+import re
+
 from github import Github, GithubException
 
 
-def _find_existing_pr(repo, title_prefix: str) -> str | None:
+def _safe_segment(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip(".-")
+    return safe or "identity"
+
+
+def _safe_branch_name(branch_name: str) -> str:
+    parts = [_safe_segment(part) for part in branch_name.split("/") if part]
+    return "/".join(parts) or "iam-zero/recommendation"
+
+
+def _find_existing_pr(repo, title: str, branch_name: str):
     for pr in repo.get_pulls(state="open"):
-        if pr.title.startswith(title_prefix):
-            return pr.html_url
+        head_ref = getattr(getattr(pr, "head", None), "ref", "")
+        if pr.title == title or head_ref == branch_name:
+            return pr
     return None
 
 
@@ -28,7 +41,10 @@ def _commit_policy_file(
     new_policy: str,
 ) -> str:
     """Create or update the recommended policy file on the branch. Returns the path."""
-    path = f"iam-zero/{cloud}/{identity_short}.recommended-policy.json"
+    path = (
+        f"iam-zero/{_safe_segment(cloud)}/"
+        f"{_safe_segment(identity_short)}.recommended-policy.json"
+    )
     message = f"chore(iam-zero): recommended least-privilege policy for {identity_short} [{cloud}]"
     content = new_policy if new_policy.endswith("\n") else new_policy + "\n"
     try:
@@ -131,6 +147,7 @@ def open_pr(
     is_new=False → an open PR for this identity already existed.
     """
     title = f"fix(iam): tighten permissions for {identity_short} [{cloud}]"
+    branch_name = _safe_branch_name(branch_name)
 
     gh = Github(github_token)
     try:
@@ -141,27 +158,50 @@ def open_pr(
             f"  Error: {e.data.get('message', str(e))}"
         ) from e
 
-    existing = _find_existing_pr(repo, f"fix(iam): tighten permissions for {identity_short}")
-    if existing:
-        return existing, False
+    existing = _find_existing_pr(repo, title, branch_name)
 
     if base_branch is None:
         base_branch = repo.default_branch
 
+    target_branch = (
+        getattr(getattr(existing, "head", None), "ref", branch_name)
+        if existing
+        else branch_name
+    )
+
     try:
-        _ensure_branch(repo, branch_name, base_branch)
-        policy_path = _commit_policy_file(repo, branch_name, cloud, identity_short, new_policy)
+        if not existing:
+            _ensure_branch(repo, target_branch, base_branch)
+        policy_path = _commit_policy_file(
+            repo, target_branch, cloud, identity_short, new_policy
+        )
     except GithubException as e:
         raise RuntimeError(
-            f"Failed to prepare branch '{branch_name}': {e.data.get('message', str(e))}"
+            f"Failed to prepare branch '{target_branch}': "
+            f"{e.data.get('message', str(e))}"
         ) from e
 
     body = _build_pr_body(
         cloud, identity, findings, current_policy, new_policy, days, policy_path
     )
 
+    if existing:
+        try:
+            if existing.body != body:
+                existing.edit(body=body)
+            return existing.html_url, False
+        except GithubException as e:
+            raise RuntimeError(
+                f"Failed to refresh existing PR: {e.data.get('message', str(e))}"
+            ) from e
+
     try:
-        pr = repo.create_pull(title=title, body=body, head=branch_name, base=base_branch)
+        pr = repo.create_pull(
+            title=title,
+            body=body,
+            head=target_branch,
+            base=base_branch,
+        )
         return pr.html_url, True
     except GithubException as e:
         raise RuntimeError(
