@@ -219,6 +219,7 @@ def _scan_aws_role(role_arn, days, profile, region, no_access_advisor, cfg, mode
         findings = analyze_aws_permissions(
             ai, role_arn, current_actions, list(used_actions), unused_actions, days,
             protected_actions=protected_actions,
+            advisory_only=no_access_advisor,
         )
         detail("done")
 
@@ -392,6 +393,7 @@ def scan_aws(role_arn, all_roles, days, profile, region, no_access_advisor, dry_
         findings = analyze_aws_permissions(
             ai, role_arn, current_actions, list(used_actions), unused_actions, days,
             protected_actions=protected_actions,
+            advisory_only=no_access_advisor,
         )
         detail("Analysis complete")
 
