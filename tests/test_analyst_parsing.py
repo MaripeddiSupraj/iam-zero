@@ -65,3 +65,32 @@ def test_protected_action_cannot_be_removed_or_omitted():
     finding = completed[0]
     assert finding["recommendation"] == "investigate"
     assert finding["last_used"] == "2026-09-20T10:00:00+00:00"
+
+
+def test_gcp_mode_never_auto_recommends_role_removal(monkeypatch):
+    from iam_zero.agent import analyst
+
+    monkeypatch.setattr(
+        analyst,
+        "_run",
+        lambda client, prompt: [
+            {
+                "permission": "roles/storage.objectAdmin",
+                "recommendation": "remove",
+                "risk": "low",
+                "reason": "No observed storage methods.",
+            }
+        ],
+    )
+
+    findings = analyst.analyze_gcp_permissions(
+        client=None,
+        service_account="sa@example.iam.gserviceaccount.com",
+        current_roles=["roles/storage.objectAdmin"],
+        used_methods=[],
+        unused_roles=["roles/storage.objectAdmin"],
+        days=90,
+    )
+
+    assert findings[0]["recommendation"] == "investigate"
+    assert "Advisory only" in findings[0]["reason"]
