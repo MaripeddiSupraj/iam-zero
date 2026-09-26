@@ -1,5 +1,10 @@
 import pytest
-from iam_zero.agent.analyst import _extract_json_array, _validate_findings
+
+from iam_zero.agent.analyst import (
+    _complete_findings,
+    _extract_json_array,
+    _validate_findings,
+)
 
 
 def test_extracts_plain_array():
@@ -26,3 +31,37 @@ def test_validate_normalizes_bad_values():
     assert len(findings) == 1
     assert findings[0]["recommendation"] == "investigate"
     assert findings[0]["risk"] == "medium"
+
+
+def test_complete_findings_fails_closed_on_model_omission():
+    completed = _complete_findings(
+        [{"permission": "s3:GetObject", "recommendation": "remove", "risk": "low"}],
+        ["s3:GetObject", "s3:PutObject"],
+    )
+
+    by_permission = {item["permission"]: item for item in completed}
+    assert by_permission["s3:GetObject"]["recommendation"] == "remove"
+    assert by_permission["s3:PutObject"]["recommendation"] == "investigate"
+    assert "kept for safety" in by_permission["s3:PutObject"]["reason"]
+
+
+def test_complete_findings_discards_hallucinated_permissions():
+    completed = _complete_findings(
+        [
+            {"permission": "iam:DeleteAccount", "recommendation": "remove", "risk": "low"},
+            {"permission": "s3:GetObject", "recommendation": "keep", "risk": "low"},
+        ],
+        ["s3:GetObject"],
+    )
+    assert [item["permission"] for item in completed] == ["s3:GetObject"]
+
+
+def test_protected_action_cannot_be_removed_or_omitted():
+    completed = _complete_findings(
+        [],
+        ["s3:GetObject"],
+        {"s3:GetObject": "2026-09-20T10:00:00+00:00"},
+    )
+    finding = completed[0]
+    assert finding["recommendation"] == "investigate"
+    assert finding["last_used"] == "2026-09-20T10:00:00+00:00"
