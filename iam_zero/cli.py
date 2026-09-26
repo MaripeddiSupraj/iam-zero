@@ -171,7 +171,7 @@ def _scan_aws_role(role_arn, days, profile, region, no_access_advisor, cfg, mode
     from .aws.cloudtrail import fetch_used_actions
     from .aws.iam_analyzer import get_role_policies, compute_unused
     from .aws.access_advisor import fetch_access_evidence, protect_active_services
-    from .aws.policy_generator import generate_minimal_policy
+    from .aws.policy_generator import combine_policy_documents, generate_minimal_policy
     from .agent.analyst import analyze_aws_permissions
 
     with scan_step(f"CloudTrail — {role_arn.split('/')[-1]}") as detail:
@@ -222,13 +222,7 @@ def _scan_aws_role(role_arn, days, profile, region, no_access_advisor, cfg, mode
         )
         detail("done")
 
-    current_policy_json = json.dumps(
-        {
-            "Version": "2012-10-17",
-            "Statement": [s for doc in raw_docs for s in doc.get("Statement", [])],
-        },
-        indent=2,
-    )
+    current_policy_json = json.dumps(combine_policy_documents(raw_docs), indent=2)
     new_policy_json = generate_minimal_policy(used_actions, findings, raw_docs)
 
     if mode.file_path:
@@ -405,13 +399,7 @@ def scan_aws(role_arn, all_roles, days, profile, region, no_access_advisor, dry_
     print_findings_table(findings, active_actions, item_label="Permission")
 
     from .aws.policy_generator import generate_minimal_policy
-    current_policy_json = json.dumps(
-        {
-            "Version": "2012-10-17",
-            "Statement": [s for doc in raw_docs for s in doc.get("Statement", [])],
-        },
-        indent=2,
-    )
+    current_policy_json = json.dumps(combine_policy_documents(raw_docs), indent=2)
     new_policy_json = generate_minimal_policy(used_actions, findings, raw_docs)
 
     if mode.is_dry_run:
