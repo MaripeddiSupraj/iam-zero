@@ -176,5 +176,17 @@ Return a JSON array only — no prose, no markdown. Example:
   {{"permission": "roles/iam.serviceAccountTokenCreator", "recommendation": "investigate", "risk": "high", "reason": "Token creation may be used by downstream services not visible in these logs."}}
 ]"""
 
-    findings = _run(client, prompt)
-    return _complete_findings(findings, unused_roles)
+    findings = _complete_findings(_run(client, prompt), unused_roles)
+
+    # Current GCP candidate detection is service-prefix heuristic evidence, not
+    # permission-level proof. Keep the tool advisory-only until a stronger
+    # provider-native signal (for example IAM Recommender) corroborates removal.
+    for finding in findings:
+        if finding["recommendation"] == "remove":
+            finding["recommendation"] = "investigate"
+            finding["reason"] = (
+                "Advisory only: GCP role usage is currently inferred from audit-log "
+                "service activity, which is insufficient for automatic role removal. "
+                + finding["reason"]
+            ).strip()
+    return findings
