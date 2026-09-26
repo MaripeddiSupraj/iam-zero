@@ -55,8 +55,13 @@ def get_github_token(cfg: dict[str, Any]) -> str:
     return token
 
 
-def get_anthropic_api_key(cfg: dict[str, Any]) -> str:
+def get_optional_anthropic_api_key(cfg: dict[str, Any]) -> str | None:
     key = os.environ.get("ANTHROPIC_API_KEY") or cfg.get("anthropic", {}).get("api_key", "")
+    return key or None
+
+
+def get_anthropic_api_key(cfg: dict[str, Any]) -> str:
+    key = get_optional_anthropic_api_key(cfg)
     if not key:
         raise ValueError(
             "Anthropic API key not configured.\n"
