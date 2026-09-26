@@ -164,6 +164,11 @@ def open_pr(
         pr = repo.create_pull(title=title, body=body, head=branch_name, base=base_branch)
         return pr.html_url, True
     except GithubException as e:
+        # Best effort: do not leave a generated branch behind when PR creation fails.
+        try:
+            repo.get_git_ref(f"heads/{branch_name}").delete()
+        except GithubException:
+            pass
         raise RuntimeError(
             f"Failed to open PR: {e.data.get('message', str(e))}"
         ) from e
