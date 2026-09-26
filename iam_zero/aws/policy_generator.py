@@ -1,9 +1,10 @@
+import copy
 import fnmatch
 import json
 
 
 def _action_matches(pattern: str, action: str) -> bool:
-    """True if an IAM action pattern (may contain wildcards) covers `action`."""
+    """True if an IAM action pattern (which may contain wildcards) covers action."""
     if pattern == action:
         return True
     if "*" in pattern or "?" in pattern:
@@ -11,70 +12,75 @@ def _action_matches(pattern: str, action: str) -> bool:
     return False
 
 
+def _observed_through(pattern: str, used_actions: set[str]) -> bool:
+    """Return True when an observed action is granted by pattern."""
+    return any(_action_matches(pattern, used) for used in used_actions)
+
+
 def generate_minimal_policy(
     used_actions: set[str],
     findings: list[dict],
     original_docs: list[dict],
 ) -> str:
-    """
-    Builds a minimal IAM policy JSON keeping only:
-    - Actions confirmed as used (even if only covered by a wildcard in the
-      original policy — they are expanded to explicit action names)
-    - Actions Claude marked as 'keep' or 'investigate'
-    """
-    keep_actions: set[str] = set(used_actions)
-    for f in findings:
-        rec = f.get("recommendation", "investigate").lower()
-        if rec in ("keep", "investigate"):
-            keep_actions.add(f["permission"])
+    """Generate a conservative recommendation without broadening policy semantics.
 
-    # Map each kept action to the resources of every original statement
-    # that covers it — exact match OR wildcard match. This is what makes
-    # 's3:GetObject' survive when the original policy only said 's3:*'.
-    resource_map: dict[str, set[str]] = {}
+    The generator edits original statements instead of rebuilding them from
+    Action + Resource. This preserves Condition, Sid, NotResource, Principal,
+    and explicit Deny statements.
+
+    Only an explicit action marked remove is deleted. Missing/unknown findings
+    are fail-closed and remain unchanged.
+
+    Wildcard grants are not narrowed automatically when an observed action is
+    covered by that wildcard. Historical activity is not sufficient proof that
+    every unobserved action in the wildcard is safe to remove.
+    """
+    remove_actions = {
+        str(f.get("permission", ""))
+        for f in findings
+        if str(f.get("recommendation", "investigate")).lower() == "remove"
+    }
+    remove_actions.discard("")
+
+    statements: list[dict] = []
+
     for doc in original_docs:
-        for stmt in doc.get("Statement", []):
-            if stmt.get("Effect") != "Allow":
+        for original in doc.get("Statement", []):
+            stmt = copy.deepcopy(original)
+
+            # Deny and NotAction are security boundaries, not rewrite targets.
+            if stmt.get("Effect") != "Allow" or "Action" not in stmt or "NotAction" in stmt:
+                statements.append(stmt)
                 continue
-            stmt_actions = stmt.get("Action", [])
-            if isinstance(stmt_actions, str):
-                stmt_actions = [stmt_actions]
-            resources = stmt.get("Resource", ["*"])
-            if isinstance(resources, str):
-                resources = [resources]
-            for kept in keep_actions:
-                if any(_action_matches(p, kept) for p in stmt_actions):
-                    resource_map.setdefault(kept, set()).update(resources)
 
-    # Any kept action not covered by the original policy at all (shouldn't
-    # normally happen) is preserved with Resource "*" and flagged via Sid
-    # rather than silently dropped.
-    orphans = sorted(a for a in keep_actions if a not in resource_map)
+            raw_actions = stmt.get("Action", [])
+            was_string = isinstance(raw_actions, str)
+            actions = [raw_actions] if was_string else list(raw_actions)
 
-    # Group by resource sets to keep the policy compact
-    resource_to_actions: dict[str, list[str]] = {}
-    for action, resources in resource_map.items():
-        key = json.dumps(sorted(resources))
-        resource_to_actions.setdefault(key, []).append(action)
+            kept: list[str] = []
+            for action in actions:
+                if action not in remove_actions:
+                    kept.append(action)
+                    continue
 
-    statements = []
-    for resources_json, actions in sorted(resource_to_actions.items()):
-        statements.append(
-            {
-                "Effect": "Allow",
-                "Action": sorted(actions),
-                "Resource": json.loads(resources_json),
-            }
-        )
-    if orphans:
-        statements.append(
-            {
-                "Sid": "IamZeroReviewUnmappedActions",
-                "Effect": "Allow",
-                "Action": orphans,
-                "Resource": "*",
-            }
-        )
+                if action in used_actions:
+                    kept.append(action)
+                    continue
+
+                if ("*" in action or "?" in action) and _observed_through(action, used_actions):
+                    kept.append(action)
+                    continue
+
+                # This exact grant was explicitly marked safe to remove.
+
+            if not kept:
+                continue
+
+            if was_string and len(kept) == 1:
+                stmt["Action"] = kept[0]
+            else:
+                stmt["Action"] = kept
+            statements.append(stmt)
 
     policy = {"Version": "2012-10-17", "Statement": statements}
     return json.dumps(policy, indent=2)
