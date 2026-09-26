@@ -1,6 +1,6 @@
 import json
 
-from iam_zero.aws.policy_generator import generate_minimal_policy
+from iam_zero.aws.policy_generator import combine_policy_documents, generate_minimal_policy
 
 
 SAMPLE_DOC = {
@@ -164,3 +164,32 @@ def test_empty_original_policy_stays_empty_without_synthesized_grants_or_denies(
     policy = json.loads(generate_minimal_policy({"s3:GetObject"}, [], []))
 
     assert policy == {"Version": "2012-10-17", "Statement": []}
+
+
+
+def test_combine_policy_documents_handles_single_statement_objects():
+    docs = [
+        {
+            "Version": "2012-10-17",
+            "Statement": {
+                "Effect": "Allow",
+                "Action": "s3:GetObject",
+                "Resource": "*",
+            },
+        },
+        {
+            "Statement": [
+                {
+                    "Effect": "Deny",
+                    "Action": "s3:DeleteObject",
+                    "Resource": "*",
+                }
+            ]
+        },
+    ]
+
+    combined = combine_policy_documents(docs)
+
+    assert len(combined["Statement"]) == 2
+    assert combined["Statement"][0]["Action"] == "s3:GetObject"
+    assert combined["Statement"][1]["Effect"] == "Deny"
