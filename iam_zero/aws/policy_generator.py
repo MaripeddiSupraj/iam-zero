@@ -58,6 +58,7 @@ def combine_policy_documents(original_docs: list[dict]) -> dict:
 
     return {"Version": version, "Statement": statements}
 
+
 def generate_minimal_policy(
     used_actions: set[str],
     findings: list[dict],
@@ -68,8 +69,7 @@ def generate_minimal_policy(
     Safety invariants:
     - explicit Deny statements are preserved
     - NotAction / NotResource statements are preserved untouched
-    - Resource, Condition, Sid, Principal-like fields and other statement
-      metadata are preserved
+    - Resource, Condition, Sid and other statement metadata are preserved
     - wildcard Action entries are preserved rather than expanded or removed
     - an action disappears only when an explicit finding says "remove"
     - actions observed as used are never removed, even if a finding is wrong
@@ -82,31 +82,31 @@ def generate_minimal_policy(
     for original in combined["Statement"]:
         stmt = deepcopy(original)
 
-            # Never rewrite Deny, NotAction, malformed/unknown statement shapes,
-            # or any non-Allow semantics.
-            if stmt.get("Effect") != "Allow" or "Action" not in stmt or "NotAction" in stmt:
-                statements.append(stmt)
-                continue
-
-            actions = stmt.get("Action")
-            was_string = isinstance(actions, str)
-            action_list = [actions] if was_string else list(actions or [])
-
-            kept: list = []
-            for action in action_list:
-                if not isinstance(action, str):
-                    kept.append(action)
-                    continue
-                if _is_wildcard_action(action) or action.lower() not in removable:
-                    kept.append(action)
-
-            # If all exact actions in an Allow statement were explicitly
-            # approved for removal, the statement grants nothing and can go.
-            if not kept:
-                continue
-
-            stmt["Action"] = kept[0] if was_string and len(kept) == 1 else kept
+        # Never rewrite Deny, NotAction, malformed/unknown statement shapes,
+        # or any non-Allow semantics.
+        if stmt.get("Effect") != "Allow" or "Action" not in stmt or "NotAction" in stmt:
             statements.append(stmt)
+            continue
+
+        actions = stmt.get("Action")
+        was_string = isinstance(actions, str)
+        action_list = [actions] if was_string else list(actions or [])
+
+        kept: list = []
+        for action in action_list:
+            if not isinstance(action, str):
+                kept.append(action)
+                continue
+            if _is_wildcard_action(action) or action.lower() not in removable:
+                kept.append(action)
+
+        # If all exact actions in an Allow statement were explicitly approved
+        # for removal, the statement grants nothing and can be omitted.
+        if not kept:
+            continue
+
+        stmt["Action"] = kept[0] if was_string and len(kept) == 1 else kept
+        statements.append(stmt)
 
     policy = {"Version": combined["Version"], "Statement": statements}
     return json.dumps(policy, indent=2)
