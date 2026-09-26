@@ -116,6 +116,24 @@ def _complete_findings(
     return completed
 
 
+def conservative_findings(
+    candidates: list[str],
+    *,
+    protected: dict[str, str] | None = None,
+    reason: str = "AI analysis disabled; preserved for human review.",
+) -> list[dict]:
+    findings = [
+        {
+            "permission": permission,
+            "recommendation": "investigate",
+            "risk": "high",
+            "reason": reason,
+            "last_used": None,
+        }
+        for permission in candidates
+    ]
+    return _complete_findings(findings, candidates, protected=protected, advisory_only=True)
+
 def _run(client: anthropic.Anthropic, prompt: str) -> list[dict]:
     response = client.messages.create(
         model=_model_name(),
