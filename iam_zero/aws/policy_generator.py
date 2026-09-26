@@ -39,6 +39,25 @@ def _removal_set(used_actions: set[str], findings: list[dict]) -> set[str]:
     return removable
 
 
+def combine_policy_documents(original_docs: list[dict]) -> dict:
+    """Combine identity policy documents for review without losing statements."""
+    version = "2012-10-17"
+    statements: list[dict] = []
+
+    for doc in original_docs:
+        if not isinstance(doc, dict):
+            continue
+        if isinstance(doc.get("Version"), str):
+            version = doc["Version"]
+        raw = doc.get("Statement", [])
+        if isinstance(raw, dict):
+            raw = [raw]
+        for statement in raw:
+            if isinstance(statement, dict):
+                statements.append(deepcopy(statement))
+
+    return {"Version": version, "Statement": statements}
+
 def generate_minimal_policy(
     used_actions: set[str],
     findings: list[dict],
@@ -57,24 +76,11 @@ def generate_minimal_policy(
     - missing/omitted model findings therefore default to KEEP
     """
     removable = _removal_set(used_actions, findings)
+    combined = combine_policy_documents(original_docs)
     statements: list[dict] = []
-    version = "2012-10-17"
 
-    for doc in original_docs:
-        if not isinstance(doc, dict):
-            continue
-        if isinstance(doc.get("Version"), str):
-            version = doc["Version"]
-
-        raw_statements = doc.get("Statement", [])
-        if isinstance(raw_statements, dict):
-            raw_statements = [raw_statements]
-
-        for original in raw_statements:
-            if not isinstance(original, dict):
-                continue
-
-            stmt = deepcopy(original)
+    for original in combined["Statement"]:
+        stmt = deepcopy(original)
 
             # Never rewrite Deny, NotAction, malformed/unknown statement shapes,
             # or any non-Allow semantics.
@@ -102,5 +108,5 @@ def generate_minimal_policy(
             stmt["Action"] = kept[0] if was_string and len(kept) == 1 else kept
             statements.append(stmt)
 
-    policy = {"Version": version, "Statement": statements}
+    policy = {"Version": combined["Version"], "Statement": statements}
     return json.dumps(policy, indent=2)
