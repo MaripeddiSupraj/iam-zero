@@ -259,14 +259,31 @@ def _scan_aws_role(role_arn, days, profile, region, no_access_advisor, cfg, mode
 @scan.command("aws")
 @click.option("--role", "role_arn", default=None, help="IAM role ARN to scan")
 @click.option("--all-roles", is_flag=True, default=False, help="Scan every IAM role in the account")
-@click.option(\n    "--days",\n    type=click.IntRange(1, 90),\n    default=90,\n    show_default=True,\n    help="CloudTrail look-back window in days (1-90)",\n)
+@click.option(
+    "--days",
+    type=click.IntRange(1, 90),
+    default=90,
+    show_default=True,
+    help="CloudTrail look-back window in days (1-90)",
+)
 @click.option("--profile", default=None, help="AWS profile name")
-@click.option("--region", default=None,
-              help="AWS region for CloudTrail lookup (LookupEvents is per-region)")
-@click.option("--no-access-advisor", is_flag=True, default=False,
-              help="Skip the IAM Access Advisor corroboration step")
-@click.option("--dry-run", is_flag=True, default=False,
-              help="Print findings to terminal only (default if no output flag given)")
+@click.option(
+    "--region",
+    multiple=True,
+    help="AWS region for CloudTrail lookup; repeat for multiple regions",
+)
+@click.option(
+    "--no-access-advisor",
+    is_flag=True,
+    default=False,
+    help="Run advisory-only without IAM last-accessed corroboration",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Print findings to terminal only (default if no output flag given)",
+)
 @click.option("--output", "output_path", default=None, metavar="PATH",
               help="Write recommended policy JSON to this file")
 @click.option("--github", "open_github_pr", is_flag=True, default=False,
