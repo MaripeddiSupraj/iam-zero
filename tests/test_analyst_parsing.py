@@ -1,5 +1,10 @@
 import pytest
-from iam_zero.agent.analyst import _extract_json_array, _validate_findings
+from iam_zero.agent.analyst import (
+    _complete_findings,
+    _extract_json_array,
+    _model_name,
+    _validate_findings,
+)
 
 
 def test_extracts_plain_array():
@@ -26,3 +31,105 @@ def test_validate_normalizes_bad_values():
     assert len(findings) == 1
     assert findings[0]["recommendation"] == "investigate"
     assert findings[0]["risk"] == "medium"
+
+
+
+def test_complete_findings_preserves_omitted_candidate():
+    findings = [
+        {
+            "permission": "s3:PutObject",
+            "recommendation": "remove",
+            "risk": "low",
+            "reason": "unused",
+            "last_used": None,
+        }
+    ]
+
+    result = _complete_findings(findings, ["s3:PutObject", "s3:DeleteObject"])
+    by_permission = {f["permission"]: f for f in result}
+
+    assert by_permission["s3:PutObject"]["recommendation"] == "remove"
+    assert by_permission["s3:DeleteObject"]["recommendation"] == "investigate"
+    assert by_permission["s3:DeleteObject"]["risk"] == "high"
+
+
+def test_complete_findings_discards_hallucinated_permission():
+    findings = [
+        {
+            "permission": "iam:DeleteRole",
+            "recommendation": "remove",
+            "risk": "low",
+            "reason": "hallucinated",
+            "last_used": None,
+        }
+    ]
+
+    result = _complete_findings(findings, ["s3:GetObject"])
+
+    assert [f["permission"] for f in result] == ["s3:GetObject"]
+    assert result[0]["recommendation"] == "investigate"
+
+
+def test_complete_findings_never_auto_removes_wildcard():
+    findings = [
+        {
+            "permission": "s3:*",
+            "recommendation": "remove",
+            "risk": "low",
+            "reason": "not seen",
+            "last_used": None,
+        }
+    ]
+
+    result = _complete_findings(findings, ["s3:*"])
+
+    assert result[0]["recommendation"] == "investigate"
+    assert result[0]["risk"] == "high"
+
+
+def test_complete_findings_protected_evidence_wins():
+    findings = [
+        {
+            "permission": "s3:GetObject",
+            "recommendation": "remove",
+            "risk": "low",
+            "reason": "not seen",
+            "last_used": None,
+        }
+    ]
+
+    result = _complete_findings(
+        findings,
+        ["s3:GetObject"],
+        protected={"s3:GetObject": "2026-09-01T10:00:00+00:00"},
+    )
+
+    assert result[0]["recommendation"] == "investigate"
+    assert result[0]["last_used"] == "2026-09-01T10:00:00+00:00"
+
+
+def test_advisory_only_downgrades_remove():
+    findings = [
+        {
+            "permission": "roles/storage.objectViewer",
+            "recommendation": "remove",
+            "risk": "low",
+            "reason": "no matching methods",
+            "last_used": None,
+        }
+    ]
+
+    result = _complete_findings(
+        findings,
+        ["roles/storage.objectViewer"],
+        advisory_only=True,
+    )
+
+    assert result[0]["recommendation"] == "investigate"
+    assert result[0]["risk"] == "high"
+
+
+
+def test_model_name_can_be_overridden(monkeypatch):
+    monkeypatch.setenv("IAM_ZERO_MODEL", "test-model")
+    assert _model_name() == "test-model"

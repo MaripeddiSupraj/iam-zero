@@ -1,5 +1,7 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import os
+from pathlib import Path
+import re
 
 
 @dataclass(frozen=True)
@@ -35,3 +37,24 @@ def write_policy_file(path: str, policy_json: str) -> None:
         f.write(policy_json)
         if not policy_json.endswith("\n"):
             f.write("\n")
+
+
+
+def bulk_output_mode(mode: OutputMode, cloud: str, identity: str) -> OutputMode:
+    """Return an output mode with a collision-free file path for one identity.
+
+    In bulk scans, --output is a directory, not a single JSON filename.
+    """
+    if not mode.file_path:
+        return mode
+
+    base = Path(mode.file_path)
+    if base.suffix.lower() == ".json":
+        raise ValueError(
+            "Bulk scans require --output to be a directory, not a JSON file. "
+            "Example: --output ./iam-zero-results"
+        )
+
+    safe_identity = re.sub(r"[^A-Za-z0-9._-]+", "-", identity).strip(".-") or "identity"
+    file_path = base / cloud / f"{safe_identity}.recommended-policy.json"
+    return replace(mode, file_path=str(file_path))

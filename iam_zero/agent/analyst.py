@@ -1,8 +1,17 @@
 import json
+import os
 
 import anthropic
 
-MODEL = "claude-sonnet-4-20250514"
+DEFAULT_MODEL = "claude-sonnet-4-20250514"
+
+
+def _model_name() -> str:
+    return (
+        os.environ.get("IAM_ZERO_MODEL")
+        or os.environ.get("ANTHROPIC_MODEL")
+        or DEFAULT_MODEL
+    )
 
 _VALID_RECOMMENDATIONS = {"remove", "keep", "investigate"}
 _VALID_RISKS = {"low", "medium", "high"}
@@ -36,17 +45,109 @@ def _validate_findings(items: list[dict]) -> list[dict]:
     return findings
 
 
+def _complete_findings(
+    findings: list[dict],
+    candidates: list[str],
+    *,
+    protected: dict[str, str] | None = None,
+    advisory_only: bool = False,
+) -> list[dict]:
+    """Make model output complete, scoped, and fail-closed.
+
+    The LLM is an advisory classifier, not an authorization engine:
+    hallucinated permissions are discarded, omitted permissions are retained
+    as investigate, wildcards are never approved for automatic removal, and
+    protected evidence always wins over a model "remove".
+    """
+    protected = protected or {}
+    candidate_set = set(candidates)
+    by_permission: dict[str, dict] = {}
+
+    priority = {"remove": 0, "investigate": 1, "keep": 2}
+    for finding in findings:
+        permission = str(finding.get("permission", ""))
+        if permission not in candidate_set:
+            continue
+        current = by_permission.get(permission)
+        if current is None or priority[finding["recommendation"]] > priority[current["recommendation"]]:
+            by_permission[permission] = dict(finding)
+
+    completed: list[dict] = []
+    for permission in candidates:
+        finding = by_permission.get(
+            permission,
+            {
+                "permission": permission,
+                "recommendation": "investigate",
+                "risk": "high",
+                "reason": "No complete model finding was returned; preserved by default.",
+                "last_used": None,
+            },
+        )
+
+        if ("*" in permission or "?" in permission) and finding["recommendation"] == "remove":
+            finding["recommendation"] = "investigate"
+            finding["risk"] = "high"
+            finding["reason"] = (
+                "Wildcard permissions are never removed automatically. "
+                + finding.get("reason", "")
+            ).strip()
+
+        if advisory_only and finding["recommendation"] == "remove":
+            finding["recommendation"] = "investigate"
+            finding["risk"] = "high"
+            finding["reason"] = (
+                "Current evidence is advisory-only and is not authoritative enough "
+                "for automatic removal. " + finding.get("reason", "")
+            ).strip()
+
+        if permission in protected:
+            finding["last_used"] = protected[permission]
+            if finding["recommendation"] == "remove":
+                finding["recommendation"] = "investigate"
+                finding["risk"] = "high"
+                finding["reason"] = (
+                    "Independent AWS activity evidence protects this permission. "
+                    + finding.get("reason", "")
+                ).strip()
+
+        completed.append(finding)
+
+    return completed
+
+
+def conservative_findings(
+    candidates: list[str],
+    *,
+    protected: dict[str, str] | None = None,
+    reason: str = "AI analysis disabled; preserved for human review.",
+) -> list[dict]:
+    findings = [
+        {
+            "permission": permission,
+            "recommendation": "investigate",
+            "risk": "high",
+            "reason": reason,
+            "last_used": None,
+        }
+        for permission in candidates
+    ]
+    return _complete_findings(findings, candidates, protected=protected, advisory_only=True)
+
 def _run(client: anthropic.Anthropic, prompt: str) -> list[dict]:
     response = client.messages.create(
-        model=MODEL,
+        model=_model_name(),
         max_tokens=4096,
-        messages=[
-            {"role": "user", "content": prompt},
-            # Prefill forces the array to start immediately — no prose, no fences.
-            {"role": "assistant", "content": "["},
-        ],
+        messages=[{"role": "user", "content": prompt}],
     )
-    raw = "[" + response.content[0].text
+    text_blocks = [
+        getattr(block, "text", "")
+        for block in response.content
+        if getattr(block, "type", "text") == "text"
+    ]
+    raw = "".join(text_blocks).strip()
+    if not raw:
+        raise ValueError("Model returned no text findings")
     return _validate_findings(_extract_json_array(raw))
 
 
@@ -58,6 +159,7 @@ def analyze_aws_permissions(
     unused_permissions: list[str],
     days: int,
     protected_actions: dict[str, str] | None = None,
+    advisory_only: bool = False,
 ) -> list[dict]:
     protected_actions = protected_actions or {}
     protected_block = ""
@@ -94,19 +196,12 @@ Return a JSON array only — no prose, no markdown. Example:
 ]"""
 
     findings = _run(client, prompt)
-
-    # Hard guarantee: protected actions can never come back as "remove",
-    # regardless of what the model said.
-    for f in findings:
-        if f["permission"] in protected_actions:
-            if f["recommendation"] == "remove":
-                f["recommendation"] = "investigate"
-                f["reason"] = (
-                    "Service recently authenticated per Access Advisor (likely data-plane "
-                    "usage invisible to CloudTrail). " + f["reason"]
-                ).strip()
-            f["last_used"] = protected_actions[f["permission"]]
-    return findings
+    return _complete_findings(
+        findings,
+        unused_permissions,
+        protected=protected_actions,
+        advisory_only=advisory_only,
+    )
 
 
 def analyze_gcp_permissions(
@@ -139,4 +234,8 @@ Return a JSON array only — no prose, no markdown. Example:
   {{"permission": "roles/iam.serviceAccountTokenCreator", "recommendation": "investigate", "risk": "high", "reason": "Token creation may be used by downstream services not visible in these logs."}}
 ]"""
 
-    return _run(client, prompt)
+    findings = _run(client, prompt)
+    # Audit-method/service matching is a useful signal, not authoritative proof
+    # that a GCP role is unused. Until provider-native IAM Recommender evidence
+    # is integrated, GCP findings are advisory-only and cannot auto-remove roles.
+    return _complete_findings(findings, unused_roles, advisory_only=True)

@@ -1,3 +1,4 @@
+from copy import deepcopy
 import os
 import sys
 from pathlib import Path
@@ -23,10 +24,10 @@ _DEFAULTS: dict[str, Any] = {
 
 def load_config() -> dict[str, Any]:
     if not CONFIG_FILE.exists():
-        return _DEFAULTS.copy()
+        return deepcopy(_DEFAULTS)
     with CONFIG_FILE.open("rb") as f:
         data = tomllib.load(f)
-    merged = _DEFAULTS.copy()
+    merged = deepcopy(_DEFAULTS)
     for section, values in data.items():
         if isinstance(values, dict):
             merged.setdefault(section, {})
@@ -54,8 +55,13 @@ def get_github_token(cfg: dict[str, Any]) -> str:
     return token
 
 
-def get_anthropic_api_key(cfg: dict[str, Any]) -> str:
+def get_optional_anthropic_api_key(cfg: dict[str, Any]) -> str | None:
     key = os.environ.get("ANTHROPIC_API_KEY") or cfg.get("anthropic", {}).get("api_key", "")
+    return key or None
+
+
+def get_anthropic_api_key(cfg: dict[str, Any]) -> str:
+    key = get_optional_anthropic_api_key(cfg)
     if not key:
         raise ValueError(
             "Anthropic API key not configured.\n"
