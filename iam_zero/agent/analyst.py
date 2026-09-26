@@ -1,8 +1,17 @@
 import json
+import os
 
 import anthropic
 
-MODEL = "claude-sonnet-4-20250514"
+DEFAULT_MODEL = "claude-sonnet-4-20250514"
+
+
+def _model_name() -> str:
+    return (
+        os.environ.get("IAM_ZERO_MODEL")
+        or os.environ.get("ANTHROPIC_MODEL")
+        or DEFAULT_MODEL
+    )
 
 _VALID_RECOMMENDATIONS = {"remove", "keep", "investigate"}
 _VALID_RISKS = {"low", "medium", "high"}
@@ -109,15 +118,18 @@ def _complete_findings(
 
 def _run(client: anthropic.Anthropic, prompt: str) -> list[dict]:
     response = client.messages.create(
-        model=MODEL,
+        model=_model_name(),
         max_tokens=4096,
-        messages=[
-            {"role": "user", "content": prompt},
-            # Prefill forces the array to start immediately — no prose, no fences.
-            {"role": "assistant", "content": "["},
-        ],
+        messages=[{"role": "user", "content": prompt}],
     )
-    raw = "[" + response.content[0].text
+    text_blocks = [
+        getattr(block, "text", "")
+        for block in response.content
+        if getattr(block, "type", "text") == "text"
+    ]
+    raw = "".join(text_blocks).strip()
+    if not raw:
+        raise ValueError("Model returned no text findings")
     return _validate_findings(_extract_json_array(raw))
 
 
@@ -129,6 +141,7 @@ def analyze_aws_permissions(
     unused_permissions: list[str],
     days: int,
     protected_actions: dict[str, str] | None = None,
+    advisory_only: bool = False,
 ) -> list[dict]:
     protected_actions = protected_actions or {}
     protected_block = ""
@@ -169,6 +182,7 @@ Return a JSON array only — no prose, no markdown. Example:
         findings,
         unused_permissions,
         protected=protected_actions,
+        advisory_only=advisory_only,
     )
 
 
