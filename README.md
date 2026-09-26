@@ -1,31 +1,39 @@
 # iam-zero ⚡
 
-> Detect overpermissive IAM roles on AWS and GCP. Auto-generate least-privilege policies. Open PRs — not tickets.
+> Detect overpermissive IAM access on AWS and GCP. Generate conservative least-privilege recommendations. Open PRs — not tickets.
 
 [![PyPI version](https://img.shields.io/pypi/v/zero-iam)](https://pypi.org/project/zero-iam/)
 [![Python versions](https://img.shields.io/pypi/pyversions/zero-iam)](https://pypi.org/project/zero-iam/)
+[![CI](https://github.com/MaripeddiSupraj/iam-zero/actions/workflows/ci.yml/badge.svg)](https://github.com/MaripeddiSupraj/iam-zero/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/MaripeddiSupraj/iam-zero)](LICENSE)
 
 Most IAM roles are massively over-permissioned. Teams either handcraft policies (slow, error-prone) or attach `AdministratorAccess` and pray. Neither scales.
 
-iam-zero reads your actual audit logs — CloudTrail for AWS, Cloud Audit Logs for GCP — figures out what permissions a role *actually* uses, and opens a GitHub PR with a tightened policy. A human reviews before anything changes.
+iam-zero combines provider evidence with conservative analysis. On AWS it uses
+CloudTrail plus IAM Access Advisor action-level and service-level last-accessed
+data. On GCP it currently uses Cloud Audit Logs as an advisory signal.
 
-No agents writing IAM policies directly. No surprises. Everything goes through code review.
+The tool never applies IAM changes directly. AWS recommendations preserve the
+original statement semantics (including conditions and explicit deny statements),
+and every generated change still goes through human review. GCP findings are
+advisory-only until a stronger provider-native signal is integrated.
 
 ---
 
 ## How it works
 
 ```
-CloudTrail / Cloud Audit Logs
+Provider evidence
+  AWS: CloudTrail + IAM Access Advisor (ACTION_LEVEL)
+  GCP: Cloud Audit Logs (advisory)
         ↓
-  What did this role actually call in the last 90 days?
+  Deterministic candidate and safety guards
         ↓
-  Claude reasons: safe to remove vs. risky
+  Claude explains risk / uncertainty
         ↓
-  Minimal policy generated
+  Conservative recommendation artifact
         ↓
-  PR opened with before/after diff
+  Optional GitHub PR for human review
 ```
 
 ---
@@ -95,16 +103,15 @@ iam-zero scan gcp \
   Permission                   Last Seen    Risk   Recommendation
   ───────────────────────────────────────────────────────────────
   roles/editor                 Never        HIGH   ✋ Keep (risky)
-  roles/storage.objectAdmin    Never        LOW    ✂  Remove
-  roles/logging.viewer         Never        LOW    ✂  Remove
+  roles/storage.objectAdmin    Never        LOW    ⚠  Investigate
+  roles/logging.viewer         Never        LOW    ⚠  Investigate
   roles/iam.serviceAccountUser 3 days ago   —      ✓  Keep (active)
 
   ╭─ Summary ────────────────────────────────╮
-  │  2 permissions safe to remove            │
-  │  1 flagged for manual review             │
+  │  3 roles flagged for manual review       │
   │  1 active — kept untouched               │
   │                                          │
-  │  Blast radius reduction:  50%            │
+  │  GCP mode is advisory-only               │
   ╰──────────────────────────────────────────╯
 ```
 
@@ -135,7 +142,11 @@ iam-zero scan gcp \
 
 - **Read-only** — never modifies IAM policies directly
 - **Dry run by default** — zero side effects unless you pass `--output` or `--github`
-- **Human in the loop** — all changes go through a PR before anything is applied
+- **Fail closed on incomplete model output** — omitted or hallucinated findings cannot silently remove access
+- **AWS policy semantics preserved** — conditions, deny statements, resources, and other statement fields are retained
+- **Access Advisor required by default on AWS** — use `--no-access-advisor` only when you explicitly accept reduced evidence
+- **GCP advisory-only today** — heuristic findings are never converted into automatic role-removal recommendations
+- **Human in the loop** — all changes go through review before anything is applied
 - **Idempotent** — won't open a duplicate PR if one already exists for this identity
 - **PRs carry the artifact** — the recommended policy is committed as
   `iam-zero/<cloud>/<identity>.recommended-policy.json` on the PR branch, so merging
@@ -145,18 +156,21 @@ iam-zero scan gcp \
 
 ## Known limitations (read before trusting output)
 
-- **CloudTrail `LookupEvents` records management events only.** Data-plane calls
-  (`s3:GetObject`, `dynamodb:GetItem`, `sqs:SendMessage`, ...) never appear there.
-  iam-zero corroborates with **IAM Access Advisor**: any action whose service shows
-  recent authentication is automatically protected from a "remove" recommendation.
-  Access Advisor is service-granular, not action-granular — treat every removal as
-  a hypothesis and test in staging first.
-- **CloudTrail lookup is per-region.** Pass `--region` for each region the role is
-  active in, or activity outside your default region will be missed.
-- **GCP Data Access audit logs are disabled by default.** If they're off, read-heavy
-  usage (GCS reads, BigQuery queries) is invisible; iam-zero's prompt biases toward
-  "investigate" for such roles, but enable Data Access logs for real signal.
-- **CloudTrail `LookupEvents` retains 90 days.** `--days` beyond 90 won't return more.
+- **AWS evidence is still historical evidence, not proof of future need.** IAM Access
+  Advisor is requested with action-level granularity and protects service-active
+  permissions that do not have tracked action data, but infrequent disaster-recovery
+  or seasonal permissions can still be legitimately unused during the observation window.
+- **CloudTrail LookupEvents is supplementary.** It covers management events and is
+  region-scoped; assumed-role sessions also make username-only lookup incomplete.
+  iam-zero therefore does not rely on CloudTrail alone for AWS removal decisions.
+- **Access Advisor action coverage is not universal.** AWS only reports action-level
+  last-accessed information for tracked actions. Service-level activity is used as a
+  conservative fallback.
+- **GCP mode is advisory-only.** Data Access audit logs may be disabled and the current
+  service-prefix heuristic is not permission-level proof. iam-zero will flag candidates
+  for investigation but will not automatically recommend role removal in GCP mode.
+- **Never treat a generated artifact as an apply-ready truth source.** Test changes in
+  staging and review policy semantics and workload requirements before production rollout.
 
 ---
 
@@ -166,7 +180,7 @@ iam-zero scan gcp \
 git clone https://github.com/MaripeddiSupraj/iam-zero
 cd iam-zero
 pip install -e ".[dev]"
-pytest      # 57 tests, all pass
+pytest
 ```
 
 ---
