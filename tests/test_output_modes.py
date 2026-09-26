@@ -1,7 +1,7 @@
 import os
 import pytest
 
-from iam_zero.shared.output import resolve_output_mode, write_policy_file
+from iam_zero.shared.output import bulk_output_mode, resolve_output_mode, write_policy_file
 
 
 # ---------------------------------------------------------------------------
@@ -90,3 +90,23 @@ class TestWritePolicyFile:
         write_policy_file(path, '{"new": true}')
         assert "new" in open(path).read()
         assert "old" not in open(path).read()
+
+
+
+class TestBulkOutputMode:
+    def test_creates_unique_per_identity_path(self):
+        mode = resolve_output_mode(False, "results", False)
+
+        aws = bulk_output_mode(mode, "aws", "my/unsafe role")
+        gcp = bulk_output_mode(mode, "gcp", "sa@example.iam.gserviceaccount.com")
+
+        assert aws.file_path == "results/aws/my-unsafe-role.recommended-policy.json"
+        assert gcp.file_path == (
+            "results/gcp/sa-example.iam.gserviceaccount.com.recommended-policy.json"
+        )
+
+    def test_rejects_single_json_path_for_bulk_scan(self):
+        mode = resolve_output_mode(False, "policy.json", False)
+
+        with pytest.raises(ValueError, match="directory"):
+            bulk_output_mode(mode, "aws", "role")
