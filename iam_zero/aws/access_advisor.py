@@ -1,11 +1,9 @@
-"""IAM Access Advisor — corroborating signal for CloudTrail gaps.
+"""AWS IAM Access Advisor evidence.
 
-CloudTrail LookupEvents returns management events only. Data-plane calls
-(s3:GetObject, dynamodb:GetItem, sqs:SendMessage, ...) never appear there,
-which makes naive "unused" detection dangerously wrong. Access Advisor
-(GenerateServiceLastAccessedDetails) reports, per service namespace, when the
-role last authenticated — including via data-plane activity. We use it to
-protect actions whose service is demonstrably active.
+CloudTrail LookupEvents is useful for management events but is incomplete for
+role usage and data-plane activity. IAM Access Advisor can produce action-level
+last-accessed data for tracked actions and service-level last-authenticated data.
+iam-zero uses both as conservative evidence before suggesting removals.
 """
 import time
 
@@ -13,28 +11,32 @@ import boto3
 from botocore.exceptions import ClientError
 
 
-def fetch_service_last_accessed(
+def fetch_access_evidence(
     role_arn: str,
     profile: str | None = None,
     timeout_seconds: int = 60,
-) -> dict[str, str | None]:
-    """
-    Returns {service_namespace: last_authenticated_iso_or_None}, e.g.
-    {"s3": "2026-06-28T09:12:00+00:00", "dynamodb": None}.
+) -> tuple[dict[str, str | None], dict[str, str]]:
+    """Return service-level and action-level last-accessed evidence.
 
-    Raises PermissionError with a fix hint if the caller lacks
-    iam:GenerateServiceLastAccessedDetails / iam:GetServiceLastAccessedDetails.
+    Action keys are normalized IAM action strings such as s3:GetObject.
+    Only AWS-tracked actions appear at action level, so service evidence is
+    retained as a conservative fallback.
     """
     session = boto3.Session(profile_name=profile)
     iam = session.client("iam")
 
     try:
-        job_id = iam.generate_service_last_accessed_details(Arn=role_arn)["JobId"]
+        job_id = iam.generate_service_last_accessed_details(
+            Arn=role_arn,
+            Granularity="ACTION_LEVEL",
+        )["JobId"]
     except ClientError as e:
         _raise_advisor_error(e, role_arn)
 
     deadline = time.monotonic() + timeout_seconds
-    result: dict[str, str | None] = {}
+    services: dict[str, str | None] = {}
+    actions: dict[str, str] = {}
+
     while True:
         try:
             resp = iam.get_service_last_accessed_details(JobId=job_id)
@@ -43,20 +45,22 @@ def fetch_service_last_accessed(
 
         status = resp["JobStatus"]
         if status == "COMPLETED":
-            for svc in resp.get("ServicesLastAccessed", []):
-                ns = svc["ServiceNamespace"]
-                last = svc.get("LastAuthenticated")
-                result[ns] = last.isoformat() if last else None
-            # Paginate if needed
+            _collect_access_evidence(resp, services, actions)
+
             marker = resp.get("Marker")
             while resp.get("IsTruncated") and marker:
-                resp = iam.get_service_last_accessed_details(JobId=job_id, Marker=marker)
-                for svc in resp.get("ServicesLastAccessed", []):
-                    ns = svc["ServiceNamespace"]
-                    last = svc.get("LastAuthenticated")
-                    result[ns] = last.isoformat() if last else None
+                try:
+                    resp = iam.get_service_last_accessed_details(
+                        JobId=job_id,
+                        Marker=marker,
+                    )
+                except ClientError as e:
+                    _raise_advisor_error(e, role_arn)
+                _collect_access_evidence(resp, services, actions)
                 marker = resp.get("Marker")
-            return result
+
+            return services, actions
+
         if status == "FAILED":
             raise RuntimeError(
                 f"Access Advisor job failed: {resp.get('Error', {}).get('Message', 'unknown')}"
@@ -64,6 +68,39 @@ def fetch_service_last_accessed(
         if time.monotonic() > deadline:
             raise RuntimeError("Access Advisor job timed out — try again")
         time.sleep(1)
+
+
+def _collect_access_evidence(
+    resp: dict,
+    services: dict[str, str | None],
+    actions: dict[str, str],
+) -> None:
+    for svc in resp.get("ServicesLastAccessed", []):
+        namespace = svc["ServiceNamespace"]
+        last = svc.get("LastAuthenticated")
+        services[namespace] = last.isoformat() if last else None
+
+        for tracked in svc.get("TrackedActionsLastAccessed", []) or []:
+            action_name = tracked.get("ActionName")
+            action_last = tracked.get("LastAccessedTime")
+            if not action_name or not action_last:
+                continue
+            action = action_name if ":" in action_name else f"{namespace}:{action_name}"
+            actions[action] = action_last.isoformat()
+
+
+def fetch_service_last_accessed(
+    role_arn: str,
+    profile: str | None = None,
+    timeout_seconds: int = 60,
+) -> dict[str, str | None]:
+    """Backward-compatible service-only view of Access Advisor evidence."""
+    services, _ = fetch_access_evidence(
+        role_arn,
+        profile=profile,
+        timeout_seconds=timeout_seconds,
+    )
+    return services
 
 
 def _raise_advisor_error(e: ClientError, role_arn: str) -> None:
@@ -84,14 +121,7 @@ def protect_active_services(
     unused_actions: list[str],
     service_last_accessed: dict[str, str | None],
 ) -> tuple[list[str], dict[str, str]]:
-    """
-    Splits unused_actions into (truly_unused, protected).
-
-    protected = {action: last_authenticated_iso} for actions whose service
-    namespace shows recent authentication per Access Advisor even though no
-    per-action CloudTrail event was found — the signature of data-plane usage.
-    These must never be recommended for removal outright.
-    """
+    """Split candidates into truly-unused and service-active protected actions."""
     truly_unused: list[str] = []
     protected: dict[str, str] = {}
     for action in unused_actions:
