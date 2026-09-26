@@ -1,3 +1,4 @@
+from copy import deepcopy
 import os
 import sys
 from pathlib import Path
@@ -23,10 +24,10 @@ _DEFAULTS: dict[str, Any] = {
 
 def load_config() -> dict[str, Any]:
     if not CONFIG_FILE.exists():
-        return _DEFAULTS.copy()
+        return deepcopy(_DEFAULTS)
     with CONFIG_FILE.open("rb") as f:
         data = tomllib.load(f)
-    merged = _DEFAULTS.copy()
+    merged = deepcopy(_DEFAULTS)
     for section, values in data.items():
         if isinstance(values, dict):
             merged.setdefault(section, {})
