@@ -5,7 +5,7 @@ import click
 import anthropic
 
 from .shared.config import load_config, save_config, get_github_token, get_anthropic_api_key
-from .shared.output import resolve_output_mode, write_policy_file
+from .shared.output import bulk_output_mode, resolve_output_mode, write_policy_file
 from .shared.report import (
     console,
     print_banner,
@@ -309,7 +309,23 @@ def scan_aws(role_arn, all_roles, days, profile, region, no_access_advisor, dry_
             )
         results = []
         for arn in identities:
-            r = _scan_aws_role(arn, days, profile, region, no_access_advisor, cfg, mode, ai, github_token, target_repo)
+            try:
+                role_mode = bulk_output_mode(mode, "aws", arn.split("/")[-1])
+            except ValueError as e:
+                print_error(str(e))
+                sys.exit(1)
+            r = _scan_aws_role(
+                arn,
+                days,
+                profile,
+                region,
+                no_access_advisor,
+                cfg,
+                role_mode,
+                ai,
+                github_token,
+                target_repo,
+            )
             if r:
                 results.append(r)
         if not results:
@@ -550,7 +566,12 @@ def scan_gcp(service_account, all_service_accounts, project, days, dry_run, outp
         _print_bulk_header("GCP", identities, days, _mode_label(mode), project=project)
         results = []
         for sa in identities:
-            r = _scan_gcp_sa(sa, project, days, cfg, mode, ai, github_token, target_repo)
+            try:
+                sa_mode = bulk_output_mode(mode, "gcp", sa)
+            except ValueError as e:
+                print_error(str(e))
+                sys.exit(1)
+            r = _scan_gcp_sa(sa, project, days, cfg, sa_mode, ai, github_token, target_repo)
             if r:
                 results.append(r)
         if not results:
